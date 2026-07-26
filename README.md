@@ -2,19 +2,6 @@
 
 Modern C++23 CMake command-line client for **UpdServer** (xeBuild / DashLaunch update server on Xbox 360).
 
-Built with **CLI11** for CLI subcommand parsing, **spdlog** for logging, and **nlohmann_json** for structured JSON output.
-
-## Features
-
-- **C++23 Standard**: Uses modern C++23 features including `std::byteswap` and `std::expected`.
-- **Auto-Discovery**: Listens for UDP broadcast announcements on port 48 (`ANNC_PORT`).
-- **Autoconnect with IP Override**: Automatically connects to the first discovered console on the network if `--ip` is omitted, or connects to `--ip <IP>` when specified.
-- **NAND Flash Management**: Fetch console info (`CPU Key`, `DVD Key`, `fuses`, kernel version), list bad blocks, dump NAND, read/write/erase raw blocks.
-- **Memory & Hypervisor Operations**: Peek/poke physical memory and HV memory, dump 1BL ROM, dump full HV.
-- **File Management**: Send and receive files to/from storage devices (`Hdd:`, `Usb:`, etc.), mount/unmount paths, create directories.
-- **Power Management**: Reboot, SMC reset, and shutdown console remotely.
-- **JSON Formatting**: Add `--json` to any command for JSON output.
-
 ## Building
 
 ```bash
