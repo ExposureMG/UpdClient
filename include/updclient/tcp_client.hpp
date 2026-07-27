@@ -1,7 +1,7 @@
 #pragma once
 
-#include "protocol.hpp"
-#include <expected>
+#include "updclient/protocol.hpp"
+#include "updclient/expected.hpp"
 #include <functional>
 #include <memory>
 #include <string>
@@ -20,49 +20,49 @@ public:
   const std::string &targetIp() const noexcept { return targetIp_; }
 
   // Core Command Methods
-  std::expected<NandInfo, std::string> getInfo();
-  std::expected<std::string, std::string> getVersion();
-  std::expected<std::vector<uint16_t>, std::string> getBadBlockList();
+  expected<NandInfo, std::string> getInfo();
+  expected<std::string, std::string> getVersion();
+  expected<std::vector<uint16_t>, std::string> getBadBlockList();
 
   // Memory & Hardware
-  std::expected<std::vector<uint8_t>, std::string> peek(uint32_t addr,
-                                                        uint32_t len);
-  std::expected<void, std::string> poke(uint32_t addr, uint32_t value);
-  std::expected<std::vector<uint8_t>, std::string> hvPeek(uint64_t addr,
+  expected<std::vector<uint8_t>, std::string> peek(uint32_t addr,
+                                                         uint32_t len);
+  expected<void, std::string> poke(uint32_t addr, uint32_t value);
+  expected<std::vector<uint8_t>, std::string> hvPeek(uint64_t addr,
                                                           uint32_t len);
-  std::expected<void, std::string> hvPoke(uint64_t addr, uint64_t value);
-  std::expected<std::vector<uint8_t>, std::string> get1bl();
-  std::expected<std::vector<uint8_t>, std::string> getBootloaders();
+  expected<void, std::string> hvPoke(uint64_t addr, uint64_t value);
+  expected<std::vector<uint8_t>, std::string> get1bl();
+  expected<std::vector<uint8_t>, std::string> getBootloaders();
 
   // File & Storage
-  std::expected<void, std::string>
+  expected<void, std::string>
   getFile(const std::string &remotePath, const std::string &localPath,
           std::function<void(size_t bytesRead)> progressCb = nullptr);
-  std::expected<void, std::string>
+  expected<void, std::string>
   sendFile(const std::string &localPath, const std::string &remotePath,
            std::function<void(size_t bytesSent)> progressCb = nullptr);
-  std::expected<void, std::string> mount(const std::string &mountPoint,
+  expected<void, std::string> mount(const std::string &mountPoint,
                                          const std::string &devicePath);
-  std::expected<void, std::string> unmount(const std::string &mountPoint);
-  std::expected<void, std::string> mkDir(const std::string &remotePath);
+  expected<void, std::string> unmount(const std::string &mountPoint);
+  expected<void, std::string> mkDir(const std::string &remotePath);
 
   // NAND Operations
-  std::expected<std::vector<uint8_t>, std::string>
+  expected<std::vector<uint8_t>, std::string>
   readBlock(uint32_t block, uint32_t count = 1);
-  std::expected<void, std::string> writeBlock(uint32_t block,
+  expected<void, std::string> writeBlock(uint32_t block,
                                               const std::vector<uint8_t> &data);
-  std::expected<void, std::string> eraseBlock(uint32_t block,
+  expected<void, std::string> eraseBlock(uint32_t block,
                                               uint32_t count = 1);
-  std::expected<void, std::string>
+  expected<void, std::string>
   dumpFlash(const std::string &outputPath, size_t dumpSize,
             std::function<void(size_t bytesRead, size_t totalSize)> progressCb =
                 nullptr);
 
   // Power
-  std::expected<void, std::string> reboot();
-  std::expected<void, std::string> smcReboot();
-  std::expected<void, std::string> shutdownConsole();
-  std::expected<void, std::string> quit();
+  expected<void, std::string> reboot();
+  expected<void, std::string> smcReboot();
+  expected<void, std::string> shutdownConsole();
+  expected<void, std::string> quit();
 
 private:
   int socketFd_ = -1;

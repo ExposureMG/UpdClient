@@ -75,12 +75,21 @@ struct UdpBcastMsg {
 };
 #pragma pack(pop)
 
-// C++23 Endianness Helpers
+// Endianness Helpers
 template <typename T>
 requires std::is_integral_v<T>
 constexpr T swap_be(T val) noexcept {
     if constexpr (std::endian::native == std::endian::little) {
-        return std::byteswap(val);
+#if defined(_MSC_VER)
+        if constexpr (sizeof(T) == 2) return _byteswap_ushort(static_cast<uint16_t>(val));
+        if constexpr (sizeof(T) == 4) return _byteswap_ulong(static_cast<uint32_t>(val));
+        if constexpr (sizeof(T) == 8) return _byteswap_uint64(static_cast<uint64_t>(val));
+#else
+        if constexpr (sizeof(T) == 2) return __builtin_bswap16(static_cast<uint16_t>(val));
+        if constexpr (sizeof(T) == 4) return __builtin_bswap32(static_cast<uint32_t>(val));
+        if constexpr (sizeof(T) == 8) return __builtin_bswap64(static_cast<uint64_t>(val));
+#endif
+        return val;
     } else {
         return val;
     }

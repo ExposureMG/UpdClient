@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(UpdClient LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -28,7 +28,14 @@ FetchContent_Declare(
     GIT_TAG        v3.11.3
 )
 
-FetchContent_MakeAvailable(cli11 spdlog json)
+# 4. tl::expected for C++20 compatibility
+FetchContent_Declare(
+    expected
+    GIT_REPOSITORY https://github.com/TartanLlama/expected.git
+    GIT_TAG        v1.1.0
+)
+
+FetchContent_MakeAvailable(cli11 spdlog json expected)
 
 add_executable(updclient
     src/net/udp_discovery.cpp
@@ -38,10 +45,12 @@ add_executable(updclient
 
 target_include_directories(updclient PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 target_link_libraries(updclient PRIVATE
     CLI11::CLI11
     spdlog::spdlog
     nlohmann_json::nlohmann_json
+    tl::expected
 )

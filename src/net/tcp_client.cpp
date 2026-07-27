@@ -1,4 +1,4 @@
-#include "tcp_client.hpp"
+#include "updclient/tcp_client.hpp"
 #include <spdlog/spdlog.h>
 
 #include <arpa/inet.h>
@@ -114,29 +114,29 @@ std::string TcpClient::receiveStringResponse() {
 
 // ---------------- COMMAND IMPLEMENTATIONS ----------------
 
-std::expected<NandInfo, std::string> TcpClient::getInfo() {
+expected<NandInfo, std::string> TcpClient::getInfo() {
   uint32_t cmdBe = swap_be(static_cast<uint32_t>(CommandOp::GetInfo));
   if (!sendRawData(&cmdBe, sizeof(cmdBe))) {
-    return std::unexpected("Failed to send GETINFO command code");
+    return unexpected("Failed to send GETINFO command code");
   }
 
   NandInfo info{};
   if (!receiveRawData(&info, sizeof(NandInfo))) {
-    return std::unexpected("Failed to receive NAND_INFO payload from server");
+    return unexpected("Failed to receive NAND_INFO payload from server");
   }
 
   return swap_nand_info(info);
 }
 
-std::expected<std::string, std::string> TcpClient::getVersion() {
+expected<std::string, std::string> TcpClient::getVersion() {
   uint32_t cmdBe = swap_be(static_cast<uint32_t>(CommandOp::GetVer));
   if (!sendRawData(&cmdBe, sizeof(cmdBe))) {
-    return std::unexpected("Failed to send GETVER command code");
+    return unexpected("Failed to send GETVER command code");
   }
 
   uint32_t versionBe = 0;
   if (!receiveRawData(&versionBe, sizeof(versionBe))) {
-    return std::unexpected("Failed to receive version from server");
+    return unexpected("Failed to receive version from server");
   }
 
   uint32_t ver = swap_be(versionBe);
@@ -144,22 +144,22 @@ std::expected<std::string, std::string> TcpClient::getVersion() {
                      ver & 0xFF);
 }
 
-std::expected<std::vector<uint16_t>, std::string> TcpClient::getBadBlockList() {
+expected<std::vector<uint16_t>, std::string> TcpClient::getBadBlockList() {
   uint32_t cmdBe = swap_be(static_cast<uint32_t>(CommandOp::GetBbList));
   if (!sendRawData(&cmdBe, sizeof(cmdBe))) {
-    return std::unexpected("Failed to send GETBBLIST command code");
+    return unexpected("Failed to send GETBBLIST command code");
   }
 
   uint32_t countBe = 0;
   if (!receiveRawData(&countBe, sizeof(countBe))) {
-    return std::unexpected("Failed to receive bad block count");
+    return unexpected("Failed to receive bad block count");
   }
 
   uint32_t count = swap_be(countBe);
   std::vector<uint16_t> bbList(count);
   if (count > 0) {
     if (!receiveRawData(bbList.data(), count * sizeof(uint16_t))) {
-      return std::unexpected("Failed to receive bad block data payload");
+      return unexpected("Failed to receive bad block data payload");
     }
     for (auto &bb : bbList) {
       bb = swap_be(bb);
@@ -168,101 +168,101 @@ std::expected<std::vector<uint16_t>, std::string> TcpClient::getBadBlockList() {
   return bbList;
 }
 
-std::expected<std::vector<uint8_t>, std::string> TcpClient::peek(uint32_t addr,
+expected<std::vector<uint8_t>, std::string> TcpClient::peek(uint32_t addr,
                                                                  uint32_t len) {
   std::string cmd = std::format("PEEK {:08X} {:08X}\n", addr, len);
   if (!sendCommandString(cmd)) {
-    return std::unexpected("Failed to send PEEK command");
+    return unexpected("Failed to send PEEK command");
   }
 
   std::vector<uint8_t> buffer(len);
   if (!receiveRawData(buffer.data(), len)) {
-    return std::unexpected("Failed to receive memory PEEK data payload");
+    return unexpected("Failed to receive memory PEEK data payload");
   }
   return buffer;
 }
 
-std::expected<void, std::string> TcpClient::poke(uint32_t addr,
+expected<void, std::string> TcpClient::poke(uint32_t addr,
                                                  uint32_t value) {
   std::string cmd = std::format("POKE {:08X} {:08X}\n", addr, value);
   if (!sendCommandString(cmd)) {
-    return std::unexpected("Failed to send POKE command");
+    return unexpected("Failed to send POKE command");
   }
   return {};
 }
 
-std::expected<std::vector<uint8_t>, std::string>
+expected<std::vector<uint8_t>, std::string>
 TcpClient::hvPeek(uint64_t addr, uint32_t len) {
   std::string cmd = std::format("HVPE {:016X} {:08X}\n", addr, len);
   if (!sendCommandString(cmd)) {
-    return std::unexpected("Failed to send HVPEEK command");
+    return unexpected("Failed to send HVPEEK command");
   }
 
   std::vector<uint8_t> buffer(len);
   if (!receiveRawData(buffer.data(), len)) {
-    return std::unexpected("Failed to receive HVPEEK data payload");
+    return unexpected("Failed to receive HVPEEK data payload");
   }
   return buffer;
 }
 
-std::expected<void, std::string> TcpClient::hvPoke(uint64_t addr,
+expected<void, std::string> TcpClient::hvPoke(uint64_t addr,
                                                    uint64_t value) {
   std::string cmd = std::format("HVPO {:016X} {:016X}\n", addr, value);
   if (!sendCommandString(cmd)) {
-    return std::unexpected("Failed to send HVPOKE command");
+    return unexpected("Failed to send HVPOKE command");
   }
   return {};
 }
 
-std::expected<std::vector<uint8_t>, std::string> TcpClient::get1bl() {
+expected<std::vector<uint8_t>, std::string> TcpClient::get1bl() {
   uint32_t cmdBe = swap_be(static_cast<uint32_t>(CommandOp::Get1Bl));
   if (!sendRawData(&cmdBe, sizeof(cmdBe))) {
-    return std::unexpected("Failed to send GET1BL command");
+    return unexpected("Failed to send GET1BL command");
   }
 
   std::vector<uint8_t> buffer(0x8000); // 1BL size 32KB
   if (!receiveRawData(buffer.data(), buffer.size())) {
-    return std::unexpected("Failed to receive 1BL payload");
+    return unexpected("Failed to receive 1BL payload");
   }
   return buffer;
 }
 
-std::expected<std::vector<uint8_t>, std::string> TcpClient::getBootloaders() {
+expected<std::vector<uint8_t>, std::string> TcpClient::getBootloaders() {
   uint32_t cmdBe = swap_be(static_cast<uint32_t>(CommandOp::GetBootloaders));
   if (!sendRawData(&cmdBe, sizeof(cmdBe))) {
-    return std::unexpected("Failed to send GETBOOTLOADERS command");
+    return unexpected("Failed to send GETBOOTLOADERS command");
   }
 
   uint32_t sizeBe = 0;
   if (!receiveRawData(&sizeBe, sizeof(sizeBe))) {
-    return std::unexpected("Failed to receive bootloader size");
+    return unexpected("Failed to receive bootloader size");
   }
 
   uint32_t totalSize = swap_be(sizeBe);
   std::vector<uint8_t> buffer(totalSize);
   if (!receiveRawData(buffer.data(), totalSize)) {
-    return std::unexpected("Failed to receive bootloaders payload");
+    return unexpected("Failed to receive bootloaders payload");
   }
   return buffer;
 }
 
-std::expected<void, std::string>
+expected<void, std::string>
 TcpClient::getFile(const std::string &remotePath, const std::string &localPath,
                    std::function<void(size_t bytesRead)> progressCb) {
   std::string cmd = std::format("GETF {}\n", remotePath);
   if (!sendCommandString(cmd)) {
-    return std::unexpected("Failed to send GETFILE command");
+    return unexpected("Failed to send GETFILE command");
   }
 
   uint32_t sizeBe = 0;
   if (!receiveRawData(&sizeBe, sizeof(sizeBe))) {
-    return std::unexpected("Failed to receive file size from server");
+    return unexpected("Failed to receive file size from server");
   }
   uint32_t fileSize = swap_be(sizeBe);
 
   std::ofstream outFile(localPath, std::ios::binary);
   if (!outFile) {
-    return std::unexpected(
+    return unexpected(
         std::format("Failed to open local destination file: {}", localPath));
   }
 
@@ -273,7 +273,7 @@ TcpClient::getFile(const std::string &remotePath, const std::string &localPath,
   while (totalReceived < fileSize) {
     size_t toRead = std::min<size_t>(CHUNK_SIZE, fileSize - totalReceived);
     if (!receiveRawData(chunk.data(), toRead)) {
-      return std::unexpected("File download payload interrupted");
+      return unexpected("File download payload interrupted");
     }
     outFile.write(reinterpret_cast<const char *>(chunk.data()), toRead);
     totalReceived += toRead;
@@ -283,12 +283,12 @@ TcpClient::getFile(const std::string &remotePath, const std::string &localPath,
   return {};
 }
 
-std::expected<void, std::string>
+expected<void, std::string>
 TcpClient::sendFile(const std::string &localPath, const std::string &remotePath,
                     std::function<void(size_t bytesSent)> progressCb) {
   std::ifstream inFile(localPath, std::ios::binary | std::ios::ate);
   if (!inFile) {
-    return std::unexpected(
+    return unexpected(
         std::format("Failed to open local source file: {}", localPath));
   }
   size_t fileSize = inFile.tellg();
@@ -296,12 +296,12 @@ TcpClient::sendFile(const std::string &localPath, const std::string &remotePath,
 
   std::string cmd = std::format("SNDF {}\n", remotePath);
   if (!sendCommandString(cmd)) {
-    return std::unexpected("Failed to send SENDFILE command");
+    return unexpected("Failed to send SENDFILE command");
   }
 
   uint32_t sizeBe = swap_be(static_cast<uint32_t>(fileSize));
   if (!sendRawData(&sizeBe, sizeof(sizeBe))) {
-    return std::unexpected("Failed to send file size header");
+    return unexpected("Failed to send file size header");
   }
 
   size_t totalSent = 0;
@@ -312,7 +312,7 @@ TcpClient::sendFile(const std::string &localPath, const std::string &remotePath,
     size_t toSend = std::min<size_t>(CHUNK_SIZE, fileSize - totalSent);
     inFile.read(reinterpret_cast<char *>(chunk.data()), toSend);
     if (!sendRawData(chunk.data(), toSend)) {
-      return std::unexpected("File send upload interrupted");
+      return unexpected("File send upload interrupted");
     }
     totalSent += toSend;
     if (progressCb)
@@ -322,86 +322,86 @@ TcpClient::sendFile(const std::string &localPath, const std::string &remotePath,
   return {};
 }
 
-std::expected<void, std::string>
+expected<void, std::string>
 TcpClient::mount(const std::string &mountPoint, const std::string &devicePath) {
   std::string cmd = std::format("MTPT {} {}\n", mountPoint, devicePath);
   if (!sendCommandString(cmd)) {
-    return std::unexpected("Failed to send MOUNTPATH command");
+    return unexpected("Failed to send MOUNTPATH command");
   }
   return {};
 }
 
-std::expected<void, std::string>
+expected<void, std::string>
 TcpClient::unmount(const std::string &mountPoint) {
   std::string cmd = std::format("UMPT {}\n", mountPoint);
   if (!sendCommandString(cmd)) {
-    return std::unexpected("Failed to send UNMOUNTPATH command");
+    return unexpected("Failed to send UNMOUNTPATH command");
   }
   return {};
 }
 
-std::expected<void, std::string>
+expected<void, std::string>
 TcpClient::mkDir(const std::string &remotePath) {
   std::string cmd = std::format("MKDR {}\n", remotePath);
   if (!sendCommandString(cmd)) {
-    return std::unexpected("Failed to send MKDIR command");
+    return unexpected("Failed to send MKDIR command");
   }
   return {};
 }
 
-std::expected<std::vector<uint8_t>, std::string>
+expected<std::vector<uint8_t>, std::string>
 TcpClient::readBlock(uint32_t block, uint32_t count) {
   std::string cmd = std::format("RBLK {:X} {:X}\n", block, count);
   if (!sendCommandString(cmd)) {
-    return std::unexpected("Failed to send READBLOCK command");
+    return unexpected("Failed to send READBLOCK command");
   }
 
   uint32_t sizeBe = 0;
   if (!receiveRawData(&sizeBe, sizeof(sizeBe))) {
-    return std::unexpected("Failed to receive block payload size");
+    return unexpected("Failed to receive block payload size");
   }
   uint32_t totalSize = swap_be(sizeBe);
 
   std::vector<uint8_t> buffer(totalSize);
   if (!receiveRawData(buffer.data(), totalSize)) {
-    return std::unexpected("Failed to receive block data");
+    return unexpected("Failed to receive block data");
   }
   return buffer;
 }
 
-std::expected<void, std::string>
+expected<void, std::string>
 TcpClient::writeBlock(uint32_t block, const std::vector<uint8_t> &data) {
   std::string cmd = std::format("WBLK {:X} 1\n", block);
   if (!sendCommandString(cmd)) {
-    return std::unexpected("Failed to send WRITEBLOCK command");
+    return unexpected("Failed to send WRITEBLOCK command");
   }
 
   if (!sendRawData(data.data(), data.size())) {
-    return std::unexpected("Failed to send block payload");
+    return unexpected("Failed to send block payload");
   }
   return {};
 }
 
-std::expected<void, std::string> TcpClient::eraseBlock(uint32_t block,
+expected<void, std::string> TcpClient::eraseBlock(uint32_t block,
                                                        uint32_t count) {
   std::string cmd = std::format("ERBL {:X} {:X}\n", block, count);
   if (!sendCommandString(cmd)) {
-    return std::unexpected("Failed to send ERASEBLOCK command");
+    return unexpected("Failed to send ERASEBLOCK command");
   }
   return {};
 }
 
-std::expected<void, std::string> TcpClient::dumpFlash(
+expected<void, std::string> TcpClient::dumpFlash(
     const std::string &outputPath, size_t dumpSize,
     std::function<void(size_t bytesRead, size_t totalSize)> progressCb) {
   uint32_t cmdBe = swap_be(static_cast<uint32_t>(CommandOp::GetFlash));
   if (!sendRawData(&cmdBe, sizeof(cmdBe))) {
-    return std::unexpected("Failed to send GETFLASH command");
+    return unexpected("Failed to send GETFLASH command");
   }
 
   std::ofstream outFile(outputPath, std::ios::binary);
   if (!outFile) {
-    return std::unexpected(
+    return unexpected(
         std::format("Failed to open output NAND dump file: {}", outputPath));
   }
 
@@ -412,7 +412,7 @@ std::expected<void, std::string> TcpClient::dumpFlash(
   while (totalReceived < dumpSize) {
     size_t toRead = std::min<size_t>(CHUNK_SIZE, dumpSize - totalReceived);
     if (!receiveRawData(chunk.data(), toRead)) {
-      return std::unexpected("NAND flash dump payload stream interrupted");
+      return unexpected("NAND flash dump payload stream interrupted");
     }
     outFile.write(reinterpret_cast<const char *>(chunk.data()), toRead);
     totalReceived += toRead;
@@ -422,25 +422,25 @@ std::expected<void, std::string> TcpClient::dumpFlash(
   return {};
 }
 
-std::expected<void, std::string> TcpClient::reboot() {
+expected<void, std::string> TcpClient::reboot() {
   uint32_t cmdBe = swap_be(static_cast<uint32_t>(CommandOp::Reboot));
   sendRawData(&cmdBe, sizeof(cmdBe));
   return {};
 }
 
-std::expected<void, std::string> TcpClient::smcReboot() {
+expected<void, std::string> TcpClient::smcReboot() {
   uint32_t cmdBe = swap_be(static_cast<uint32_t>(CommandOp::SmcReboot));
   sendRawData(&cmdBe, sizeof(cmdBe));
   return {};
 }
 
-std::expected<void, std::string> TcpClient::shutdownConsole() {
+expected<void, std::string> TcpClient::shutdownConsole() {
   uint32_t cmdBe = swap_be(static_cast<uint32_t>(CommandOp::Shutdown));
   sendRawData(&cmdBe, sizeof(cmdBe));
   return {};
 }
 
-std::expected<void, std::string> TcpClient::quit() {
+expected<void, std::string> TcpClient::quit() {
   uint32_t cmdBe = swap_be(static_cast<uint32_t>(CommandOp::Quit));
   sendRawData(&cmdBe, sizeof(cmdBe));
   return {};

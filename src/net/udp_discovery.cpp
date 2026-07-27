@@ -1,5 +1,5 @@
-#include "udp_discovery.hpp"
-#include "protocol.hpp"
+#include "updclient/udp_discovery.hpp"
+#include "updclient/protocol.hpp"
 #include <spdlog/spdlog.h>
 
 #include <arpa/inet.h>
