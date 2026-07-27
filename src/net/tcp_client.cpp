@@ -1,15 +1,10 @@
 #include "updclient/tcp_client.hpp"
+#include "updclient/net_compat.hpp"
 #include <spdlog/spdlog.h>
 
-#include <arpa/inet.h>
 #include <cstring>
-#include <fcntl.h>
-#include <format>
 #include <fstream>
-#include <netinet/in.h>
 #include <sstream>
-#include <sys/socket.h>
-#include <unistd.h>
 
 namespace updclient {
 
@@ -19,8 +14,8 @@ bool TcpClient::connect(const std::string &ipAddress, uint16_t port) {
   disconnect();
 
   socketFd_ = ::socket(AF_INET, SOCK_STREAM, 0);
-  if (socketFd_ < 0) {
-    spdlog::error("Failed to create TCP socket: {}", strerror(errno));
+  if (socketFd_ == INVALID_SOCKET_FD) {
+    spdlog::error("Failed to create TCP socket (err {})", get_last_socket_error());
     return false;
   }
 
@@ -35,14 +30,12 @@ bool TcpClient::connect(const std::string &ipAddress, uint16_t port) {
   }
 
   // Set connection timeout (5 seconds)
-  timeval timeout{.tv_sec = 5, .tv_usec = 0};
-  ::setsockopt(socketFd_, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-  ::setsockopt(socketFd_, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+  set_socket_timeout(socketFd_, 5000);
 
   if (::connect(socketFd_, reinterpret_cast<sockaddr *>(&serverAddr),
                 sizeof(serverAddr)) < 0) {
-    spdlog::error("Failed to connect to UpdServer at {}:{}: {}", ipAddress,
-                  port, strerror(errno));
+    spdlog::error("Failed to connect to UpdServer at {}:{}: (err {})", ipAddress,
+                  port, get_last_socket_error());
     disconnect();
     return false;
   }
@@ -53,9 +46,9 @@ bool TcpClient::connect(const std::string &ipAddress, uint16_t port) {
 }
 
 void TcpClient::disconnect() {
-  if (socketFd_ >= 0) {
-    ::close(socketFd_);
-    socketFd_ = -1;
+  if (socketFd_ != INVALID_SOCKET_FD) {
+    close_socket(socketFd_);
+    socketFd_ = INVALID_SOCKET_FD;
   }
 }
 
@@ -73,9 +66,9 @@ bool TcpClient::sendRawData(const void *data, size_t length) {
   const auto *ptr = static_cast<const char *>(data);
 
   while (totalSent < length) {
-    ssize_t sent = ::send(socketFd_, ptr + totalSent, length - totalSent, 0);
+    auto sent = ::send(socketFd_, ptr + totalSent, static_cast<int>(length - totalSent), 0);
     if (sent <= 0) {
-      spdlog::error("Socket send failed: {}", strerror(errno));
+      spdlog::error("Socket send failed (err {})", get_last_socket_error());
       return false;
     }
     totalSent += sent;
@@ -90,9 +83,9 @@ bool TcpClient::receiveRawData(void *data, size_t length) {
   auto *ptr = static_cast<char *>(data);
 
   while (totalRead < length) {
-    ssize_t bytes = ::recv(socketFd_, ptr + totalRead, length - totalRead, 0);
+    auto bytes = ::recv(socketFd_, ptr + totalRead, static_cast<int>(length - totalRead), 0);
     if (bytes <= 0) {
-      spdlog::error("Socket receive failed: {}", strerror(errno));
+      spdlog::error("Socket receive failed (err {})", get_last_socket_error());
       return false;
     }
     totalRead += bytes;
@@ -104,7 +97,7 @@ std::string TcpClient::receiveStringResponse() {
   if (!isConnected())
     return {};
   char buf[1024];
-  ssize_t bytes = ::recv(socketFd_, buf, sizeof(buf) - 1, 0);
+  auto bytes = ::recv(socketFd_, buf, static_cast<int>(sizeof(buf) - 1), 0);
   if (bytes > 0) {
     buf[bytes] = '\0';
     return std::string(buf);

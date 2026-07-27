@@ -35,22 +35,46 @@ FetchContent_Declare(
     GIT_TAG        v1.1.0
 )
 
+set(EXPECTED_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+
 FetchContent_MakeAvailable(cli11 spdlog json expected)
 
-add_executable(updclient
+option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
+option(UPDCLIENT_BUILD_CLI "Build CLI executable" ON)
+
+# Library target
+add_library(updclient_lib
     src/net/udp_discovery.cpp
     src/net/tcp_client.cpp
-    src/main.cpp
 )
 
-target_include_directories(updclient PRIVATE
+add_library(UpdClient::updclient_lib ALIAS updclient_lib)
+
+target_include_directories(updclient_lib PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-target_link_libraries(updclient PRIVATE
-    CLI11::CLI11
+target_link_libraries(updclient_lib PUBLIC
     spdlog::spdlog
     nlohmann_json::nlohmann_json
     tl::expected
 )
+
+if(WIN32 OR MINGW)
+    target_link_libraries(updclient_lib PUBLIC ws2_32)
+    add_compile_definitions(_WIN32_WINNT=0x0600)
+endif()
+
+if(BUILD_SHARED_LIBS)
+    target_compile_definitions(updclient_lib PRIVATE UPDCLIENT_EXPORTS)
+else()
+    target_compile_definitions(updclient_lib PUBLIC UPDCLIENT_STATIC)
+endif()
+
+# CLI Executable target
+if(UPDCLIENT_BUILD_CLI)
+    add_executable(updclient src/main.cpp)
+    target_link_libraries(updclient PRIVATE updclient_lib CLI11::CLI11)
+endif()

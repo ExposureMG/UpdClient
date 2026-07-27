@@ -2,6 +2,7 @@
 
 #include "updclient/protocol.hpp"
 #include "updclient/expected.hpp"
+#include "updclient/net_compat.hpp"
 #include <functional>
 #include <memory>
 #include <string>
@@ -9,14 +10,14 @@
 
 namespace updclient {
 
-class TcpClient {
+class UPDCLIENT_API TcpClient {
 public:
   TcpClient() = default;
   ~TcpClient();
 
   bool connect(const std::string &ipAddress, uint16_t port = NANDSVR_PORT);
   void disconnect();
-  bool isConnected() const noexcept { return socketFd_ >= 0; }
+  bool isConnected() const noexcept { return socketFd_ != INVALID_SOCKET_FD; }
   const std::string &targetIp() const noexcept { return targetIp_; }
 
   // Core Command Methods
@@ -65,7 +66,7 @@ public:
   expected<void, std::string> quit();
 
 private:
-  int socketFd_ = -1;
+  socket_t socketFd_ = INVALID_SOCKET_FD;
   std::string targetIp_;
 
   bool sendCommandString(const std::string &cmdStr);

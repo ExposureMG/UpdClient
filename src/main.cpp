@@ -1,18 +1,23 @@
 #include "updclient/tcp_client.hpp"
 #include "updclient/udp_discovery.hpp"
 #include "updclient/protocol.hpp"
+#include "updclient/net_compat.hpp"
 
 #include <CLI/CLI.hpp>
 #include <spdlog/spdlog.h>
 #include <nlohmann/json.hpp>
 
 #include <iostream>
-#include <format>
 #include <fstream>
 
 using json = nlohmann::json;
 
 namespace updclient {
+
+struct SocketInitRAII {
+    SocketInitRAII() { socket_init(); }
+    ~SocketInitRAII() { socket_cleanup(); }
+};
 
 std::string resolveTargetIp(const std::string& explicitIp) {
     if (!explicitIp.empty()) {
@@ -35,6 +40,7 @@ std::string resolveTargetIp(const std::string& explicitIp) {
 } // namespace updclient
 
 int main(int argc, char** argv) {
+    updclient::SocketInitRAII socketInit;
     CLI::App app{"UpdClient - Modern C++23 XeBuild/DashLaunch UpdServer Client"};
 
     std::string ipAddress;

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "export.hpp"
+
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -108,6 +110,6 @@ inline NandInfo swap_nand_info(const NandInfo& in) noexcept {
     return out;
 }
 
-std::string format_hex_bytes(const uint8_t* data, size_t length);
+UPDCLIENT_API std::string format_hex_bytes(const uint8_t* data, size_t length);
 
 } // namespace updclient

@@ -1,14 +1,10 @@
 #include "updclient/udp_discovery.hpp"
 #include "updclient/protocol.hpp"
+#include "updclient/net_compat.hpp"
 #include <spdlog/spdlog.h>
 
-#include <arpa/inet.h>
 #include <cstring>
-#include <fcntl.h>
-#include <netinet/in.h>
 #include <set>
-#include <sys/socket.h>
-#include <unistd.h>
 
 namespace updclient {
 
@@ -26,14 +22,14 @@ UdpDiscovery::discoverAll(std::chrono::milliseconds timeout) {
   std::vector<DiscoveredConsole> result;
   std::set<std::string> seenIps;
 
-  int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
-  if (fd < 0) {
-    spdlog::error("Failed to create UDP socket: {}", strerror(errno));
+  socket_t fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+  if (fd == INVALID_SOCKET_FD) {
+    spdlog::error("Failed to create UDP socket (err {})", get_last_socket_error());
     return result;
   }
 
   int reuse = 1;
-  ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+  ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char *>(&reuse), sizeof(reuse));
 
   sockaddr_in addr{};
   addr.sin_family = AF_INET;
@@ -41,15 +37,8 @@ UdpDiscovery::discoverAll(std::chrono::milliseconds timeout) {
   addr.sin_addr.s_addr = INADDR_ANY;
 
   if (::bind(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0) {
-    if (errno == EACCES || errno == EPERM) {
-      spdlog::error("Failed to bind UDP port {}: {} (Port < 1024 requires root "
-                    "privileges: try 'sudo ./updclient discover')",
-                    ANNC_PORT, strerror(errno));
-    } else {
-      spdlog::error("Failed to bind UDP port {}: {}", ANNC_PORT,
-                    strerror(errno));
-    }
-    ::close(fd);
+    spdlog::error("Failed to bind UDP port {}: (err {})", ANNC_PORT, get_last_socket_error());
+    close_socket(fd);
     return result;
   }
 
@@ -66,14 +55,14 @@ UdpDiscovery::discoverAll(std::chrono::milliseconds timeout) {
     tv.tv_sec = 0;
     tv.tv_usec = 200'000; // 200ms polling chunks
 
-    int selRet = ::select(fd + 1, &readfds, nullptr, nullptr, &tv);
+    int selRet = ::select(static_cast<int>(fd) + 1, &readfds, nullptr, nullptr, &tv);
     if (selRet > 0 && FD_ISSET(fd, &readfds)) {
       UdpBcastMsg msg{};
       sockaddr_in srcAddr{};
       socklen_t srcLen = sizeof(srcAddr);
 
-      ssize_t bytes =
-          ::recvfrom(fd, &msg, sizeof(msg), 0,
+      auto bytes =
+          ::recvfrom(fd, reinterpret_cast<char *>(&msg), sizeof(msg), 0,
                      reinterpret_cast<sockaddr *>(&srcAddr), &srcLen);
       if (bytes == sizeof(UdpBcastMsg)) {
         if (swap_be(msg.magic) == CMD_MAGIC_BE || msg.magic == CMD_MAGIC_BE) {
@@ -92,7 +81,7 @@ UdpDiscovery::discoverAll(std::chrono::milliseconds timeout) {
     }
   }
 
-  ::close(fd);
+  close_socket(fd);
   return result;
 }
 
