@@ -1,6 +1,6 @@
 #pragma once
 
-#include "export.hpp"
+#include "cpp_compat.hpp"
 
 #if defined(_WIN32) || defined(__CYGWIN__)
     #include <winsock2.h>

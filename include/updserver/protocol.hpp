@@ -1,6 +1,6 @@
 #pragma once
 
-#include "export.hpp"
+#include "cpp_compat.hpp"
 
 #include <cstdint>
 #include <string>
@@ -8,7 +8,7 @@
 #include <bit>
 #include <array>
 
-namespace updclient {
+namespace updclient::updserver {
 
 constexpr uint16_t ANNC_PORT = 48;
 constexpr uint16_t NANDSVR_PORT = 49;
@@ -110,6 +110,8 @@ inline NandInfo swap_nand_info(const NandInfo& in) noexcept {
     return out;
 }
 
-UPDCLIENT_API std::string format_hex_bytes(const uint8_t* data, size_t length);
+} // namespace updclient::updserver
 
-} // namespace updclient
+namespace updclient {
+UPDCLIENT_API std::string format_hex_bytes(const uint8_t* data, size_t length);
+}

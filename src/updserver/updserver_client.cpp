@@ -1,134 +1,50 @@
-#include "updclient/tcp_client.hpp"
-#include "updclient/net_compat.hpp"
+#include "updserver/updserver_client.hpp"
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <cstring>
+#include <format>
 #include <fstream>
 #include <sstream>
 
-namespace updclient {
+namespace updclient::updserver {
 
-TcpClient::~TcpClient() { disconnect(); }
-
-bool TcpClient::connect(const std::string &ipAddress, uint16_t port) {
-  disconnect();
-
-  socketFd_ = ::socket(AF_INET, SOCK_STREAM, 0);
-  if (socketFd_ == INVALID_SOCKET_FD) {
-    spdlog::error("Failed to create TCP socket (err {})", get_last_socket_error());
-    return false;
+bool UpdServerClient::connect(const std::string &ipAddress, uint16_t port) {
+  bool success = tcpSocket_.connect(ipAddress, port, 5000);
+  if (success) {
+    spdlog::info("Connected to UpdServer at {}:{}", ipAddress, port);
   }
-
-  sockaddr_in serverAddr{};
-  serverAddr.sin_family = AF_INET;
-  serverAddr.sin_port = htons(port);
-
-  if (::inet_pton(AF_INET, ipAddress.c_str(), &serverAddr.sin_addr) <= 0) {
-    spdlog::error("Invalid IP address: {}", ipAddress);
-    disconnect();
-    return false;
-  }
-
-  // Set connection timeout (5 seconds)
-  set_socket_timeout(socketFd_, 5000);
-
-  if (::connect(socketFd_, reinterpret_cast<sockaddr *>(&serverAddr),
-                sizeof(serverAddr)) < 0) {
-    spdlog::error("Failed to connect to UpdServer at {}:{}: (err {})", ipAddress,
-                  port, get_last_socket_error());
-    disconnect();
-    return false;
-  }
-
-  targetIp_ = ipAddress;
-  spdlog::info("Connected to UpdServer at {}:{}", ipAddress, port);
-  return true;
+  return success;
 }
 
-void TcpClient::disconnect() {
-  if (socketFd_ != INVALID_SOCKET_FD) {
-    close_socket(socketFd_);
-    socketFd_ = INVALID_SOCKET_FD;
-  }
-}
-
-bool TcpClient::sendCommandString(const std::string &cmdStr) {
-  if (!isConnected())
-    return false;
-  spdlog::debug("Sending Command String: '{}'", cmdStr);
-  return sendRawData(cmdStr.c_str(), cmdStr.length());
-}
-
-bool TcpClient::sendRawData(const void *data, size_t length) {
-  if (!isConnected())
-    return false;
-  size_t totalSent = 0;
-  const auto *ptr = static_cast<const char *>(data);
-
-  while (totalSent < length) {
-    auto sent = ::send(socketFd_, ptr + totalSent, static_cast<int>(length - totalSent), 0);
-    if (sent <= 0) {
-      spdlog::error("Socket send failed (err {})", get_last_socket_error());
-      return false;
-    }
-    totalSent += sent;
-  }
-  return true;
-}
-
-bool TcpClient::receiveRawData(void *data, size_t length) {
-  if (!isConnected())
-    return false;
-  size_t totalRead = 0;
-  auto *ptr = static_cast<char *>(data);
-
-  while (totalRead < length) {
-    auto bytes = ::recv(socketFd_, ptr + totalRead, static_cast<int>(length - totalRead), 0);
-    if (bytes <= 0) {
-      spdlog::error("Socket receive failed (err {})", get_last_socket_error());
-      return false;
-    }
-    totalRead += bytes;
-  }
-  return true;
-}
-
-std::string TcpClient::receiveStringResponse() {
-  if (!isConnected())
-    return {};
-  char buf[1024];
-  auto bytes = ::recv(socketFd_, buf, static_cast<int>(sizeof(buf) - 1), 0);
-  if (bytes > 0) {
-    buf[bytes] = '\0';
-    return std::string(buf);
-  }
-  return {};
+void UpdServerClient::disconnect() {
+  tcpSocket_.disconnect();
 }
 
 // ---------------- COMMAND IMPLEMENTATIONS ----------------
 
-expected<NandInfo, std::string> TcpClient::getInfo() {
+expected<NandInfo, std::string> UpdServerClient::getInfo() {
   uint32_t cmdBe = swap_be(static_cast<uint32_t>(CommandOp::GetInfo));
-  if (!sendRawData(&cmdBe, sizeof(cmdBe))) {
+  if (!tcpSocket_.sendRaw(&cmdBe, sizeof(cmdBe))) {
     return unexpected("Failed to send GETINFO command code");
   }
 
   NandInfo info{};
-  if (!receiveRawData(&info, sizeof(NandInfo))) {
+  if (!tcpSocket_.recvRaw(&info, sizeof(NandInfo))) {
     return unexpected("Failed to receive NAND_INFO payload from server");
   }
 
   return swap_nand_info(info);
 }
 
-expected<std::string, std::string> TcpClient::getVersion() {
+expected<std::string, std::string> UpdServerClient::getVersion() {
   uint32_t cmdBe = swap_be(static_cast<uint32_t>(CommandOp::GetVer));
-  if (!sendRawData(&cmdBe, sizeof(cmdBe))) {
+  if (!tcpSocket_.sendRaw(&cmdBe, sizeof(cmdBe))) {
     return unexpected("Failed to send GETVER command code");
   }
 
   uint32_t versionBe = 0;
-  if (!receiveRawData(&versionBe, sizeof(versionBe))) {
+  if (!tcpSocket_.recvRaw(&versionBe, sizeof(versionBe))) {
     return unexpected("Failed to receive version from server");
   }
 
@@ -137,21 +53,21 @@ expected<std::string, std::string> TcpClient::getVersion() {
                      ver & 0xFF);
 }
 
-expected<std::vector<uint16_t>, std::string> TcpClient::getBadBlockList() {
+expected<std::vector<uint16_t>, std::string> UpdServerClient::getBadBlockList() {
   uint32_t cmdBe = swap_be(static_cast<uint32_t>(CommandOp::GetBbList));
-  if (!sendRawData(&cmdBe, sizeof(cmdBe))) {
+  if (!tcpSocket_.sendRaw(&cmdBe, sizeof(cmdBe))) {
     return unexpected("Failed to send GETBBLIST command code");
   }
 
   uint32_t countBe = 0;
-  if (!receiveRawData(&countBe, sizeof(countBe))) {
+  if (!tcpSocket_.recvRaw(&countBe, sizeof(countBe))) {
     return unexpected("Failed to receive bad block count");
   }
 
   uint32_t count = swap_be(countBe);
   std::vector<uint16_t> bbList(count);
   if (count > 0) {
-    if (!receiveRawData(bbList.data(), count * sizeof(uint16_t))) {
+    if (!tcpSocket_.recvRaw(bbList.data(), count * sizeof(uint16_t))) {
       return unexpected("Failed to receive bad block data payload");
     }
     for (auto &bb : bbList) {
@@ -161,94 +77,92 @@ expected<std::vector<uint16_t>, std::string> TcpClient::getBadBlockList() {
   return bbList;
 }
 
-expected<std::vector<uint8_t>, std::string> TcpClient::peek(uint32_t addr,
-                                                                 uint32_t len) {
+expected<std::vector<uint8_t>, std::string> UpdServerClient::peek(uint32_t addr,
+                                                                  uint32_t len) {
   std::string cmd = std::format("PEEK {:08X} {:08X}\n", addr, len);
-  if (!sendCommandString(cmd)) {
+  if (!tcpSocket_.sendString(cmd)) {
     return unexpected("Failed to send PEEK command");
   }
 
   std::vector<uint8_t> buffer(len);
-  if (!receiveRawData(buffer.data(), len)) {
+  if (!tcpSocket_.recvRaw(buffer.data(), len)) {
     return unexpected("Failed to receive memory PEEK data payload");
   }
   return buffer;
 }
 
-expected<void, std::string> TcpClient::poke(uint32_t addr,
-                                                 uint32_t value) {
+expected<void, std::string> UpdServerClient::poke(uint32_t addr, uint32_t value) {
   std::string cmd = std::format("POKE {:08X} {:08X}\n", addr, value);
-  if (!sendCommandString(cmd)) {
+  if (!tcpSocket_.sendString(cmd)) {
     return unexpected("Failed to send POKE command");
   }
   return {};
 }
 
-expected<std::vector<uint8_t>, std::string>
-TcpClient::hvPeek(uint64_t addr, uint32_t len) {
+expected<std::vector<uint8_t>, std::string> UpdServerClient::hvPeek(uint64_t addr,
+                                                                    uint32_t len) {
   std::string cmd = std::format("HVPE {:016X} {:08X}\n", addr, len);
-  if (!sendCommandString(cmd)) {
+  if (!tcpSocket_.sendString(cmd)) {
     return unexpected("Failed to send HVPEEK command");
   }
 
   std::vector<uint8_t> buffer(len);
-  if (!receiveRawData(buffer.data(), len)) {
+  if (!tcpSocket_.recvRaw(buffer.data(), len)) {
     return unexpected("Failed to receive HVPEEK data payload");
   }
   return buffer;
 }
 
-expected<void, std::string> TcpClient::hvPoke(uint64_t addr,
-                                                   uint64_t value) {
+expected<void, std::string> UpdServerClient::hvPoke(uint64_t addr, uint64_t value) {
   std::string cmd = std::format("HVPO {:016X} {:016X}\n", addr, value);
-  if (!sendCommandString(cmd)) {
+  if (!tcpSocket_.sendString(cmd)) {
     return unexpected("Failed to send HVPOKE command");
   }
   return {};
 }
 
-expected<std::vector<uint8_t>, std::string> TcpClient::get1bl() {
+expected<std::vector<uint8_t>, std::string> UpdServerClient::get1bl() {
   uint32_t cmdBe = swap_be(static_cast<uint32_t>(CommandOp::Get1Bl));
-  if (!sendRawData(&cmdBe, sizeof(cmdBe))) {
+  if (!tcpSocket_.sendRaw(&cmdBe, sizeof(cmdBe))) {
     return unexpected("Failed to send GET1BL command");
   }
 
   std::vector<uint8_t> buffer(0x8000); // 1BL size 32KB
-  if (!receiveRawData(buffer.data(), buffer.size())) {
+  if (!tcpSocket_.recvRaw(buffer.data(), buffer.size())) {
     return unexpected("Failed to receive 1BL payload");
   }
   return buffer;
 }
 
-expected<std::vector<uint8_t>, std::string> TcpClient::getBootloaders() {
+expected<std::vector<uint8_t>, std::string> UpdServerClient::getBootloaders() {
   uint32_t cmdBe = swap_be(static_cast<uint32_t>(CommandOp::GetBootloaders));
-  if (!sendRawData(&cmdBe, sizeof(cmdBe))) {
+  if (!tcpSocket_.sendRaw(&cmdBe, sizeof(cmdBe))) {
     return unexpected("Failed to send GETBOOTLOADERS command");
   }
 
   uint32_t sizeBe = 0;
-  if (!receiveRawData(&sizeBe, sizeof(sizeBe))) {
+  if (!tcpSocket_.recvRaw(&sizeBe, sizeof(sizeBe))) {
     return unexpected("Failed to receive bootloader size");
   }
 
   uint32_t totalSize = swap_be(sizeBe);
   std::vector<uint8_t> buffer(totalSize);
-  if (!receiveRawData(buffer.data(), totalSize)) {
+  if (!tcpSocket_.recvRaw(buffer.data(), totalSize)) {
     return unexpected("Failed to receive bootloaders payload");
   }
   return buffer;
 }
 
 expected<void, std::string>
-TcpClient::getFile(const std::string &remotePath, const std::string &localPath,
-                   std::function<void(size_t bytesRead)> progressCb) {
+UpdServerClient::getFile(const std::string &remotePath, const std::string &localPath,
+                          std::function<void(size_t bytesRead)> progressCb) {
   std::string cmd = std::format("GETF {}\n", remotePath);
-  if (!sendCommandString(cmd)) {
+  if (!tcpSocket_.sendString(cmd)) {
     return unexpected("Failed to send GETFILE command");
   }
 
   uint32_t sizeBe = 0;
-  if (!receiveRawData(&sizeBe, sizeof(sizeBe))) {
+  if (!tcpSocket_.recvRaw(&sizeBe, sizeof(sizeBe))) {
     return unexpected("Failed to receive file size from server");
   }
   uint32_t fileSize = swap_be(sizeBe);
@@ -265,7 +179,7 @@ TcpClient::getFile(const std::string &remotePath, const std::string &localPath,
 
   while (totalReceived < fileSize) {
     size_t toRead = std::min<size_t>(CHUNK_SIZE, fileSize - totalReceived);
-    if (!receiveRawData(chunk.data(), toRead)) {
+    if (!tcpSocket_.recvRaw(chunk.data(), toRead)) {
       return unexpected("File download payload interrupted");
     }
     outFile.write(reinterpret_cast<const char *>(chunk.data()), toRead);
@@ -277,8 +191,8 @@ TcpClient::getFile(const std::string &remotePath, const std::string &localPath,
 }
 
 expected<void, std::string>
-TcpClient::sendFile(const std::string &localPath, const std::string &remotePath,
-                    std::function<void(size_t bytesSent)> progressCb) {
+UpdServerClient::sendFile(const std::string &localPath, const std::string &remotePath,
+                           std::function<void(size_t bytesSent)> progressCb) {
   std::ifstream inFile(localPath, std::ios::binary | std::ios::ate);
   if (!inFile) {
     return unexpected(
@@ -288,12 +202,12 @@ TcpClient::sendFile(const std::string &localPath, const std::string &remotePath,
   inFile.seekg(0, std::ios::beg);
 
   std::string cmd = std::format("SNDF {}\n", remotePath);
-  if (!sendCommandString(cmd)) {
+  if (!tcpSocket_.sendString(cmd)) {
     return unexpected("Failed to send SENDFILE command");
   }
 
   uint32_t sizeBe = swap_be(static_cast<uint32_t>(fileSize));
-  if (!sendRawData(&sizeBe, sizeof(sizeBe))) {
+  if (!tcpSocket_.sendRaw(&sizeBe, sizeof(sizeBe))) {
     return unexpected("Failed to send file size header");
   }
 
@@ -304,7 +218,7 @@ TcpClient::sendFile(const std::string &localPath, const std::string &remotePath,
   while (totalSent < fileSize) {
     size_t toSend = std::min<size_t>(CHUNK_SIZE, fileSize - totalSent);
     inFile.read(reinterpret_cast<char *>(chunk.data()), toSend);
-    if (!sendRawData(chunk.data(), toSend)) {
+    if (!tcpSocket_.sendRaw(chunk.data(), toSend)) {
       return unexpected("File send upload interrupted");
     }
     totalSent += toSend;
@@ -316,79 +230,77 @@ TcpClient::sendFile(const std::string &localPath, const std::string &remotePath,
 }
 
 expected<void, std::string>
-TcpClient::mount(const std::string &mountPoint, const std::string &devicePath) {
+UpdServerClient::mount(const std::string &mountPoint, const std::string &devicePath) {
   std::string cmd = std::format("MTPT {} {}\n", mountPoint, devicePath);
-  if (!sendCommandString(cmd)) {
+  if (!tcpSocket_.sendString(cmd)) {
     return unexpected("Failed to send MOUNTPATH command");
   }
   return {};
 }
 
-expected<void, std::string>
-TcpClient::unmount(const std::string &mountPoint) {
+expected<void, std::string> UpdServerClient::unmount(const std::string &mountPoint) {
   std::string cmd = std::format("UMPT {}\n", mountPoint);
-  if (!sendCommandString(cmd)) {
+  if (!tcpSocket_.sendString(cmd)) {
     return unexpected("Failed to send UNMOUNTPATH command");
   }
   return {};
 }
 
-expected<void, std::string>
-TcpClient::mkDir(const std::string &remotePath) {
+expected<void, std::string> UpdServerClient::mkDir(const std::string &remotePath) {
   std::string cmd = std::format("MKDR {}\n", remotePath);
-  if (!sendCommandString(cmd)) {
+  if (!tcpSocket_.sendString(cmd)) {
     return unexpected("Failed to send MKDIR command");
   }
   return {};
 }
 
 expected<std::vector<uint8_t>, std::string>
-TcpClient::readBlock(uint32_t block, uint32_t count) {
+UpdServerClient::readBlock(uint32_t block, uint32_t count) {
   std::string cmd = std::format("RBLK {:X} {:X}\n", block, count);
-  if (!sendCommandString(cmd)) {
+  if (!tcpSocket_.sendString(cmd)) {
     return unexpected("Failed to send READBLOCK command");
   }
 
   uint32_t sizeBe = 0;
-  if (!receiveRawData(&sizeBe, sizeof(sizeBe))) {
+  if (!tcpSocket_.recvRaw(&sizeBe, sizeof(sizeBe))) {
     return unexpected("Failed to receive block payload size");
   }
   uint32_t totalSize = swap_be(sizeBe);
 
   std::vector<uint8_t> buffer(totalSize);
-  if (!receiveRawData(buffer.data(), totalSize)) {
+  if (!tcpSocket_.recvRaw(buffer.data(), totalSize)) {
     return unexpected("Failed to receive block data");
   }
   return buffer;
 }
 
 expected<void, std::string>
-TcpClient::writeBlock(uint32_t block, const std::vector<uint8_t> &data) {
+UpdServerClient::writeBlock(uint32_t block, const std::vector<uint8_t> &data) {
   std::string cmd = std::format("WBLK {:X} 1\n", block);
-  if (!sendCommandString(cmd)) {
+  if (!tcpSocket_.sendString(cmd)) {
     return unexpected("Failed to send WRITEBLOCK command");
   }
 
-  if (!sendRawData(data.data(), data.size())) {
+  if (!tcpSocket_.sendRaw(data.data(), data.size())) {
     return unexpected("Failed to send block payload");
   }
   return {};
 }
 
-expected<void, std::string> TcpClient::eraseBlock(uint32_t block,
-                                                       uint32_t count) {
+expected<void, std::string> UpdServerClient::eraseBlock(uint32_t block,
+                                                         uint32_t count) {
   std::string cmd = std::format("ERBL {:X} {:X}\n", block, count);
-  if (!sendCommandString(cmd)) {
+  if (!tcpSocket_.sendString(cmd)) {
     return unexpected("Failed to send ERASEBLOCK command");
   }
   return {};
 }
 
-expected<void, std::string> TcpClient::dumpFlash(
+expected<void, std::string> UpdServerClient::dumpFlash(
     const std::string &outputPath, size_t dumpSize,
     std::function<void(size_t bytesRead, size_t totalSize)> progressCb) {
   uint32_t cmdBe = swap_be(static_cast<uint32_t>(CommandOp::GetFlash));
-  if (!sendRawData(&cmdBe, sizeof(cmdBe))) {
+  if (!tcpSocket_.sendRaw(&cmdBe, sizeof(cmdBe))) {
     return unexpected("Failed to send GETFLASH command");
   }
 
@@ -404,7 +316,7 @@ expected<void, std::string> TcpClient::dumpFlash(
 
   while (totalReceived < dumpSize) {
     size_t toRead = std::min<size_t>(CHUNK_SIZE, dumpSize - totalReceived);
-    if (!receiveRawData(chunk.data(), toRead)) {
+    if (!tcpSocket_.recvRaw(chunk.data(), toRead)) {
       return unexpected("NAND flash dump payload stream interrupted");
     }
     outFile.write(reinterpret_cast<const char *>(chunk.data()), toRead);
@@ -415,29 +327,33 @@ expected<void, std::string> TcpClient::dumpFlash(
   return {};
 }
 
-expected<void, std::string> TcpClient::reboot() {
+expected<void, std::string> UpdServerClient::reboot() {
   uint32_t cmdBe = swap_be(static_cast<uint32_t>(CommandOp::Reboot));
-  sendRawData(&cmdBe, sizeof(cmdBe));
+  tcpSocket_.sendRaw(&cmdBe, sizeof(cmdBe));
   return {};
 }
 
-expected<void, std::string> TcpClient::smcReboot() {
+expected<void, std::string> UpdServerClient::smcReboot() {
   uint32_t cmdBe = swap_be(static_cast<uint32_t>(CommandOp::SmcReboot));
-  sendRawData(&cmdBe, sizeof(cmdBe));
+  tcpSocket_.sendRaw(&cmdBe, sizeof(cmdBe));
   return {};
 }
 
-expected<void, std::string> TcpClient::shutdownConsole() {
+expected<void, std::string> UpdServerClient::shutdownConsole() {
   uint32_t cmdBe = swap_be(static_cast<uint32_t>(CommandOp::Shutdown));
-  sendRawData(&cmdBe, sizeof(cmdBe));
+  tcpSocket_.sendRaw(&cmdBe, sizeof(cmdBe));
   return {};
 }
 
-expected<void, std::string> TcpClient::quit() {
+expected<void, std::string> UpdServerClient::quit() {
   uint32_t cmdBe = swap_be(static_cast<uint32_t>(CommandOp::Quit));
-  sendRawData(&cmdBe, sizeof(cmdBe));
+  tcpSocket_.sendRaw(&cmdBe, sizeof(cmdBe));
   return {};
 }
+
+} // namespace updclient::updserver
+
+namespace updclient {
 
 std::string format_hex_bytes(const uint8_t *data, size_t length) {
   std::stringstream ss;
@@ -448,3 +364,4 @@ std::string format_hex_bytes(const uint8_t *data, size_t length) {
 }
 
 } // namespace updclient
+

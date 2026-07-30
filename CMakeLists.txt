@@ -45,8 +45,12 @@ option(UPDCLIENT_BUILD_CLI "Build CLI executable" ON)
 
 # Library target
 add_library(updclient_lib
-    src/net/udp_discovery.cpp
-    src/net/tcp_client.cpp
+    src/network/tcp_socket.cpp
+    src/network/udp_listener.cpp
+    src/updserver/updserver_client.cpp
+    src/updserver/updserver_discovery.cpp
+    src/xell/xell_client.cpp
+    src/xell/xell_discovery.cpp
 )
 
 add_library(UpdClient::updclient_lib ALIAS updclient_lib)
