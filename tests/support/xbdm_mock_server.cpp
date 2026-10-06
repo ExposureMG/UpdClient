@@ -1332,6 +1332,8 @@ bool sendfile(State &st, Connection &c, const Args &args) {
   if (!created) return refuse(status(413));
   const bool store = st.options.storeUploads;
   (*created)->stored = store;
+  // Growing the buffer piece by piece would copy it again and again under the lock.
+  if (store) (*created)->data->reserve(static_cast<size_t>(*length));
   XbdmUploadRecord record{c.index, path, *length, 0, false};
   lock.unlock();
 
@@ -1350,8 +1352,8 @@ bool sendfile(State &st, Connection &c, const Args &args) {
     if (!node || node->directory) return;
     if (node->data.use_count() > 1) node->data = std::make_shared<Bytes>(*node->data);
     if (node->stored) node->data->insert(node->data->end(), bytes.begin(), bytes.end());
+    else node->digest.add(bytes);
     node->size += bytes.size();
-    node->digest.add(bytes);
   };
   while (record.received < *length) {
     if (dropAt && record.received >= *dropAt) {
