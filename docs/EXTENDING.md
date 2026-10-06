@@ -40,6 +40,11 @@ Contract:
 - `setTimeout(0)` disables the timeout. `Endpoint::timeout` is the initial value.
 - `close()` is idempotent and `noexcept`; after it, `isOpen()` is false and reads and writes fail with
   `ErrorCode::NotConnected`.
+- `close()` and `isOpen()` must be safe to call from another thread while a read or write is in
+  progress, and `close()` must wake that call, which then fails with `ErrorCode::Cancelled` rather
+  than waiting for its timeout or reporting end of stream. Never release a handle that a blocked call
+  may still be using. See [Cancellation](ARCHITECTURE.md#cancellation) for how `TcpTransport` does
+  it. In the serial example below, `SerialPort::close()` (not shown) would have to do the same.
 - Translate OS errors into `ErrorCode` values (`ConnectFailed` when opening, `Timeout`, `Disconnected`,
   `Io`). Put the OS error number in `Error::sysError`.
 - Read device-specific settings from `Endpoint::options`; reject bad ones with `InvalidArgument`.
@@ -736,7 +741,9 @@ Rules for CLI commands:
   a failed exchange closes the connection.
 - `http_lite` is HTTP/1.0 GET only: no chunked encoding, redirects, keep-alive or TLS. Responses with
   another `Transfer-Encoding` are rejected as `Unsupported`.
-- Clients and transports are not thread-safe; the two registries are.
+- Clients and transports are not thread-safe, except `ITransport::close()` and `isOpen()`; the two
+  registries are.
+- A TCP connect cannot be cancelled from another thread; it is bounded by `Endpoint::timeout`.
 - `Context::explicitEndpoint` and `resolveUpdServerEndpoint` in the CLI know two protocols and treat
   discovered devices as `tcp` endpoints.
 - The library has a C++ API only. A shared build exports `UPDCLIENT_API` symbols that use `std::string`

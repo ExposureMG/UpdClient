@@ -200,7 +200,7 @@ Things to know:
 
 - `Result<T>` is `expected<T, Error>`. `Error` carries an `ErrorCode` (`Unknown`, `InvalidArgument`,
   `Unsupported`, `NotConnected`, `ConnectFailed`, `Timeout`, `Disconnected`, `Io`, `Protocol`,
-  `LimitExceeded`), a message and the OS error number. `formatError` renders all three and
+  `LimitExceeded`, `Cancelled`), a message and the OS error number. `formatError` renders all three and
   `errorCodeName` gives the code as text.
 - `Endpoint` is a URI: `scheme://host[:port][?key=value&...]`. A bare `host` or `host:port` means `tcp`.
   Port 0 means "unspecified": for `tcp` the protocol client substitutes its default (UpdServer 49,
@@ -208,6 +208,9 @@ Things to know:
   `defaultPort`, or `usesProtocolPort`). The `timeout` option (milliseconds, capped at
   `Endpoint::kMaxTimeout`, 24 hours) sets `Endpoint::timeout`, which bounds the connect and the initial
   read/write timeout. Other options are kept in `Endpoint::options` for transports that need them.
+- To cancel a long read or write, call `close()` on its transport from another thread: the blocked
+  call returns `ErrorCode::Cancelled` at once instead of waiting for its timeout. A TCP connect cannot
+  be cancelled this way; it is bounded by `Endpoint::timeout`.
 - Protocol clients never create sockets. `UpdServerClient` takes a `net::TransportPtr` (or connects
   one through `TransportRegistry`); `XellClient` takes a connector returning a transport. Anything
   that implements `net::ITransport` can carry either protocol.

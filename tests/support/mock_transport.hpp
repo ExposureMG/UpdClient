@@ -6,6 +6,7 @@
 #include "support/test_util.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -160,11 +161,14 @@ private:
 
   size_t readCalls_ = 0;
   size_t writeCalls_ = 0;
-  bool closed_ = false;
+  std::atomic<bool> closed_{false};
   bool timeoutSet_ = false;
   std::chrono::milliseconds lastTimeout_{0};
 };
 
+// close() may be called from another thread. Reads and writes never block, so
+// there is nothing for it to wake: a call that starts after it fails with NotConnected.
+// For a transport that blocks, and so for cancellation tests, use MemoryPipe.
 class MockTransport final : public updclient::net::ITransport {
 public:
   explicit MockTransport(std::shared_ptr<MockScript> script) : script_(std::move(script)) {}

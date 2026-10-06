@@ -17,7 +17,10 @@ enum class ErrorCode {
   Disconnected,
   Io,
   Protocol,
-  LimitExceeded
+  LimitExceeded,
+  // An operation in progress was abandoned because the transport was closed
+  // locally, typically by close() from another thread.
+  Cancelled
 };
 
 struct Error {
@@ -48,6 +51,7 @@ inline const char *errorCodeName(ErrorCode code) noexcept {
   case ErrorCode::Io: return "Io";
   case ErrorCode::Protocol: return "Protocol";
   case ErrorCode::LimitExceeded: return "LimitExceeded";
+  case ErrorCode::Cancelled: return "Cancelled";
   }
   return "Unknown";
 }

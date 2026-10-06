@@ -81,8 +81,10 @@ These rules hold in the tree today and are checked by `grep -r '#include' includ
 sockets: handle and length types, `closesocket` versus `close`, `WSAStartup`, `poll` versus `select`,
 non-blocking connect, error classification, `getaddrinfo`. It exposes `platform::Socket`
 (move-only RAII handle), `platform::RuntimeGuard` (refcounted `WSAStartup`/`WSACleanup`; a no-op
-elsewhere), `resolve`, `connectWithTimeout`, `waitReadable`, `sendSome`, `recvSome`, `recvFrom`,
-`bindSocket` and friends. The CMake `PRIVATE` include directory `src/` is what lets
+elsewhere), `platform::WakeSignal` (wakes a wait on another thread: a pipe on POSIX, a UDP socket
+connected to itself on 127.0.0.1 under Winsock, whose `select` takes only sockets), `resolve`,
+`connectWithTimeout`, `waitReadable`, `waitFor` (readable or writable, or woken), `shutdownBoth`,
+`wouldBlock`, `sendSome`, `recvSome`, `recvFrom`, `bindSocket` and friends. The CMake `PRIVATE` include directory `src/` is what lets
 `src/net/tcp_transport.cpp` write `#include "net/platform/socket_platform.hpp"`; consumers of the
 library never see that directory. Windows defines (`_WIN32_WINNT=0x0600`, `WIN32_LEAN_AND_MEAN`,
 `NOMINMAX`) and `ws2_32` are also `PRIVATE`.
@@ -98,7 +100,8 @@ library never see that directory. Windows defines (`_WIN32_WINNT=0x0600`, `WIN32
   consumer's `-std`: `Result<T>` is in every exported signature, so a prebuilt library and its consumers
   must see the same type.
 - `core/error.hpp`: `ErrorCode`, `Error { code, message, sysError }`, `Result<T>`, `makeError`, `fail`
-  (returns `unexpected<Error>`), `errorCodeName`, `formatError`.
+  (returns `unexpected<Error>`), `errorCodeName`, `formatError`. New codes are appended, so existing
+  values never change; `Cancelled` is the newest.
 - `core/hex.hpp`: `formatHex` and `parseHex`.
 - `core/path.hpp`: `pathFromUtf8` and `pathToUtf8`, header only. UTF-8 text and `std::filesystem::path`
   convert through these (a `std::string` path is ANSI on Windows). Local file arguments of the clients are
@@ -119,7 +122,8 @@ failures (I/O errors, bad input, protocol violations).
   members: `isOpen`, `close`, `describe`, `setTimeout`, `readSome`, `writeSome`. `readSome` returning 0
   means orderly end of stream; a timeout is an `ErrorCode::Timeout` error. The base class supplies
   `writeAll`, `readExact` (EOF before the buffer is full is `Disconnected`) and `readUntilEof(maxBytes)`
-  (`LimitExceeded` past the cap), so every transport gets identical framing helpers.
+  (`LimitExceeded` past the cap), so every transport gets identical framing helpers. Cancellation is
+  part of the contract, see [Cancellation](#cancellation).
 - `TransportRegistry` (`net/transport_registry.hpp`): thread-safe map from scheme (case-insensitive) to
   `Connector = std::function<Result<TransportPtr>(const Endpoint &)>`. `instance()` is process-wide;
   independent instances can be constructed, which is how tests isolate themselves. An unknown scheme is
@@ -128,7 +132,9 @@ failures (I/O errors, bad input, protocol violations).
   protocol's own port if the scheme `usesProtocolPort` (`tcp` does), else port 0 stays. Protocol clients
   use it instead of writing 49 or 80 into every endpoint.
 - `TcpTransport` (`net/tcp_transport.hpp`): the built-in `tcp` transport, registered by
-  `registerBuiltins()`. It resolves through `getaddrinfo` and tries each returned address.
+  `registerBuiltins()`. It resolves through `getaddrinfo` and tries each returned address. After the
+  connect the socket is non-blocking: `readSome`/`writeSome` try the call and, when it would block,
+  wait in `platform::waitFor` on the socket and the transport's `WakeSignal`, up to the timeout.
 - `IDatagramSocket` and `UdpSocket` (`net/datagram.hpp`, `net/udp_socket.hpp`): UDP for discovery.
   `bind(port, reuse)` and `receive(timeout)` suit passive listeners. `bindWith(DatagramBindOptions)`
   (bind address, IPv4/IPv6, broadcast, multicast group and interface) and `sendTo(data, address, port)`
@@ -215,6 +221,30 @@ use 3. See the README for the table.
 
 `TransportRegistry` and `DiscoveryRegistry` are thread-safe. `registerBuiltins()` is thread-safe and
 idempotent. Protocol clients and transports are not thread-safe: use one at a time, or one per thread.
+The one exception is `ITransport::close()` (and `isOpen()`), which any thread may call at any time.
+
+### Cancellation
+
+`close()` on another thread is how a long transfer is cancelled. The contract, stated in
+`net/transport.hpp`, holds for every transport, including the test transports:
+
+- `close()` is idempotent, `noexcept` and returns promptly; it never waits for a timeout.
+- A `readSome` or `writeSome` in progress when `close()` runs returns `ErrorCode::Cancelled` promptly.
+  So do `readExact`, `writeAll` and `readUntilEof`, even when the close falls between two of their
+  primitive calls (the helpers turn a later `NotConnected` into `Cancelled`). A local close is never
+  reported as end of stream, so `readUntilEof` cannot return truncated data as success.
+- A call that starts after `close()` fails with `ErrorCode::NotConnected`. Code that cancels treats
+  both codes as "closed locally".
+- The transport object must outlive every call on it; destroying it is not a way to cancel.
+
+`TcpTransport` does this with a mutex-guarded count of calls in progress. `close()` marks the
+transport closed, calls `shutdown` on the socket (the peer sees end of stream at once), signals the
+`WakeSignal` that every wait also watches, and releases the descriptors only when no call is using
+them, so a descriptor can never be closed and reused under a blocked thread. After a wait or a
+failed or empty `recv`/`send`, the closed flag decides: `Cancelled`.
+
+A TCP connect cannot be cancelled: `TcpTransport::connect` is a factory and there is no transport to
+close until it returns. It is bounded by `Endpoint::timeout`.
 `XellClient` is stateless apart from its connector, so concurrent calls are only as safe as the
 connector.
 
@@ -232,11 +262,14 @@ calling the library.
 ```
 tests/main.cpp                     runner: --list, --filter <text>, --verbose
 tests/core/                        error, expected shim, hex, path
-tests/net/                         endpoint, transport helpers, registry, http_lite, tcp loopback, udp
+tests/net/                         endpoint, transport helpers, registry, http_lite, tcp loopback, udp,
+                                   close() from another thread (tcp and MemoryPipe)
 tests/discovery/                   discovery registry
 tests/protocols/updserver/         client, discovery
 tests/protocols/xell/              client, discovery
 tests/support/mock_transport.hpp   MockScript / MockTransport: scripted reads, expected writes, fault injection
+tests/support/memory_transport.hpp MemoryPipe: two connected blocking in-memory transports (cancellation,
+                                   a mock server on another thread, no sockets)
 tests/support/fake_datagram_socket.hpp   FakeDatagrams: scripted UDP source
 tests/support/loopback_server.hpp  throwaway TCP server on 127.0.0.1
 ```
