@@ -26,8 +26,12 @@ Requirements: CMake 3.20 or newer and a C++20 compiler. The library needs only C
 `<concepts>`, `<bit>`). The CLI additionally uses `<format>`, which means GCC 13+, Clang 17+ or a
 recent MSVC.
 
-Dependencies are fetched with CMake `FetchContent` on the first configure: CLI11 2.4.2, spdlog 1.14.1,
-nlohmann_json 3.11.3 and TartanLlama/expected 1.1.0. `Result<T>` is built on `tl::expected` by default.
+Dependencies: the library needs spdlog and TartanLlama/expected; the CLI adds CLI11 and nlohmann_json.
+By default they are fetched with CMake `FetchContent` on the first configure (spdlog 1.14.1, expected
+1.1.0, CLI11 2.4.2, nlohmann_json 3.11.3). `-DUPDCLIENT_USE_SYSTEM_DEPS=ON` uses installed packages
+instead, and an existing source tree can stand in for any download; see
+[Dependencies and offline builds](#dependencies-and-offline-builds). `Result<T>` is built on
+`tl::expected` by default.
 It is part of the library's ABI, so it never depends on the `-std` a consumer compiles with. Configure
 with `-DUPDCLIENT_USE_STD_EXPECTED=ON` (and `-DCMAKE_CXX_STANDARD=23`) to use `std::expected` instead;
 the installed target then carries `UPDCLIENT_USE_STD_EXPECTED` so consumers agree with the library.
@@ -80,7 +84,9 @@ Winsock is linked (`ws2_32`) and initialised on demand by the library; callers n
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `UPDCLIENT_BUILD_CLI` | `ON` | Build the `updclient` executable. Turn off to avoid CLI11 and nlohmann_json. |
+| `UPDCLIENT_BUILD_CLI` | `ON` | Build the `updclient` executable. When off, CLI11 and nlohmann_json are neither declared nor looked for. |
+| `UPDCLIENT_USE_SYSTEM_DEPS` | `OFF` | Look for each dependency with `find_package(... CONFIG)` first and fetch only the ones not found. |
+| `UPDCLIENT_USE_STD_EXPECTED` | `OFF` | Build `Result<T>` on `std::expected` (needs `-DCMAKE_CXX_STANDARD=23`); tl-expected is then not needed. |
 | `UPDCLIENT_BUILD_TESTS` | `ON` at top level | Build `updclient_tests` from `tests/`. |
 | `UPDCLIENT_WARNINGS` | `ON` at top level | `-Wall -Wextra -Wpedantic` (`/W4` on MSVC) for project targets. |
 | `UPDCLIENT_INSTALL` | `ON` at top level | Generate install and export rules (`UpdClientConfig.cmake`). |
@@ -90,22 +96,62 @@ When UpdClient is added with `add_subdirectory`, the tests, warnings and install
 Library sources are every `src/**/*.cpp` except `src/main.cpp` and `src/cli/`; they are globbed, so a
 new file needs no CMake edit (re-run CMake to pick it up).
 
-### Offline builds
+### Dependencies and offline builds
 
-The four `FetchContent_Declare` names are `cli11`, `spdlog`, `json` and `expected`. Point each at an
-existing source tree to build without network access:
+| Needed by | `FetchContent` name | Package (`find_package`) | Target | Pinned tag |
+| --- | --- | --- | --- | --- |
+| library | `spdlog` | `spdlog` 1.14 or newer 1.x | `spdlog::spdlog` | v1.14.1 |
+| library (unless `UPDCLIENT_USE_STD_EXPECTED`) | `expected` | `tl-expected` 1.x | `tl::expected` | v1.1.0 |
+| CLI only | `cli11` | `CLI11` 2.4 or newer 2.x | `CLI11::CLI11` | v2.4.2 |
+| CLI only | `json` | `nlohmann_json` 3.11 or newer 3.x | `nlohmann_json::nlohmann_json` | v3.11.3 |
+
+Each dependency comes from the first of:
+
+1. a target of that name that already exists, so a parent project that uses `add_subdirectory` can
+   supply its own copy;
+2. with `-DUPDCLIENT_USE_SYSTEM_DEPS=ON`, an installed package;
+3. `FetchContent`, which downloads the pinned tag, or builds `FETCHCONTENT_SOURCE_DIR_<NAME>` when that
+   is set.
+
+The configure output names the source of each one (`UpdClient: spdlog: using installed spdlog 1.17.0`,
+`UpdClient: expected: building from /src/expected`, ...). With `UPDCLIENT_BUILD_CLI=OFF` only spdlog and
+expected are involved, so the library configures and builds with just those two.
+
+To build without network access, set `FETCHCONTENT_FULLY_DISCONNECTED=ON` and give every dependency that
+is not installed a source tree. For example, the library and tests alone:
+
+```sh
+cmake -S . -B build -DUPDCLIENT_BUILD_CLI=OFF \
+  -DFETCHCONTENT_FULLY_DISCONNECTED=ON \
+  -DFETCHCONTENT_SOURCE_DIR_SPDLOG=/path/to/spdlog \
+  -DFETCHCONTENT_SOURCE_DIR_EXPECTED=/path/to/expected
+```
+
+everything, with nothing installed:
 
 ```sh
 cmake -S . -B build \
   -DFETCHCONTENT_FULLY_DISCONNECTED=ON \
-  -DFETCHCONTENT_SOURCE_DIR_CLI11=/path/to/CLI11 \
   -DFETCHCONTENT_SOURCE_DIR_SPDLOG=/path/to/spdlog \
-  -DFETCHCONTENT_SOURCE_DIR_JSON=/path/to/json \
-  -DFETCHCONTENT_SOURCE_DIR_EXPECTED=/path/to/expected
+  -DFETCHCONTENT_SOURCE_DIR_EXPECTED=/path/to/expected \
+  -DFETCHCONTENT_SOURCE_DIR_CLI11=/path/to/CLI11 \
+  -DFETCHCONTENT_SOURCE_DIR_JSON=/path/to/json
 ```
 
-The dependencies are skipped when the targets `spdlog`, `tl::expected`, `CLI11::CLI11` or
-`nlohmann_json::nlohmann_json` already exist, so a parent project can supply its own copies.
+or with the installed packages used where present (here spdlog and nlohmann_json) and source trees for
+the rest:
+
+```sh
+cmake -S . -B build -DUPDCLIENT_USE_SYSTEM_DEPS=ON \
+  -DFETCHCONTENT_FULLY_DISCONNECTED=ON \
+  -DFETCHCONTENT_SOURCE_DIR_EXPECTED=/path/to/expected \
+  -DFETCHCONTENT_SOURCE_DIR_CLI11=/path/to/CLI11
+```
+
+A source tree is only read: it is built inside the build directory. If a dependency is needed while
+`FETCHCONTENT_FULLY_DISCONNECTED` is on and nothing provides it (no target, no installed package, no
+`FETCHCONTENT_SOURCE_DIR_<NAME>`, no `_deps/<name>-src` from an earlier configure of the same build
+directory), configuration stops with a message that names the missing variable.
 
 ### Install
 
@@ -114,9 +160,10 @@ cmake --install build --prefix /usr/local
 ```
 
 installs the library, the public headers under `include/updclient/`, the `updclient` binary and the
-CMake package files; the bundled spdlog and tl-expected are installed into the same prefix. A consumer
-then uses `find_package(UpdClient)` and links `UpdClient::updclient_lib`; the package needs `tl-expected`
-(and `spdlog` for a static build) to be findable.
+CMake package files; a spdlog or tl-expected that was fetched is installed into the same prefix, an
+installed one is looked up again. A consumer then uses `find_package(UpdClient)` and links
+`UpdClient::updclient_lib`; the package needs `tl-expected` (and `spdlog` for a static build) to be
+findable.
 
 ## Tests
 

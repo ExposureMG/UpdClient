@@ -211,11 +211,15 @@ use 3. See the README for the table.
   `src/`.
 - Link: `tl::expected` public (unless `UPDCLIENT_USE_STD_EXPECTED`, which adds a public compile definition instead); `spdlog::spdlog` private; `ws2_32` private on Windows. The CLI links CLI11,
   nlohmann_json, spdlog and the library.
-- `FetchContent` names `cli11`, `spdlog`, `json`, `expected` are fixed so
-  `FETCHCONTENT_SOURCE_DIR_<NAME>` overrides work. A dependency whose target already exists is not
-  fetched.
+- Dependencies go through one macro, `updclient_dependency(name package version target)`: an existing
+  `target` wins, then (with `UPDCLIENT_USE_SYSTEM_DEPS`) `find_package(package version CONFIG)`, then
+  `FetchContent_MakeAvailable(name)`. The `FetchContent` names `cli11`, `spdlog`, `json`, `expected`
+  are fixed so `FETCHCONTENT_SOURCE_DIR_<NAME>` overrides work. CLI11 and nlohmann_json are declared and
+  resolved only when `UPDCLIENT_BUILD_CLI` is on, and tl-expected only without
+  `UPDCLIENT_USE_STD_EXPECTED`. Under `FETCHCONTENT_FULLY_DISCONNECTED` a dependency with no source
+  is a configure error naming the variable to set. See the README for the commands.
 - Under Clang, spdlog's bundled fmt is built with `FMT_CONSTEVAL=` to avoid consteval format-string
-  checks failing on recent Clang releases.
+  checks failing on recent Clang releases. An installed spdlog is used as it is.
 
 ## Threading
 
