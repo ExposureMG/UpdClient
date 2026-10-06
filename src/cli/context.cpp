@@ -1,0 +1,184 @@
+#include "cli/context.hpp"
+
+#include <spdlog/spdlog.h>
+
+#include <algorithm>
+#include <charconv>
+#include <chrono>
+#include <iostream>
+
+#if defined(_WIN32)
+#include <io.h>
+#define UPDCLIENT_ISATTY _isatty
+#define UPDCLIENT_FILENO _fileno
+#else
+#include <unistd.h>
+#define UPDCLIENT_ISATTY isatty
+#define UPDCLIENT_FILENO fileno
+#endif
+
+namespace updclient::cli {
+
+namespace {
+
+bool interactive() {
+  return UPDCLIENT_ISATTY(UPDCLIENT_FILENO(stdin)) != 0 && UPDCLIENT_ISATTY(UPDCLIENT_FILENO(stderr)) != 0;
+}
+
+std::string lowered(std::string text) {
+  std::transform(text.begin(), text.end(), text.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return text;
+}
+
+std::string joinSchemes(const std::vector<std::string> &schemes) {
+  std::string out;
+  for (const auto &scheme : schemes) out += (out.empty() ? "" : ", ") + scheme;
+  return out;
+}
+
+Outcome<void> checkSchemeRegistered(const net::Endpoint &endpoint) {
+  const auto schemes = net::TransportRegistry::instance().schemes();
+  if (std::find(schemes.begin(), schemes.end(), lowered(endpoint.scheme)) != schemes.end()) return {};
+  return usageError("no transport registered for scheme '" + endpoint.scheme + "' (available: " +
+                    joinSchemes(schemes) + ")");
+}
+
+} // namespace
+
+int exitCodeFor(ErrorCode code) noexcept {
+  switch (code) {
+  case ErrorCode::InvalidArgument: return kExitUsage;
+  default: return kExitRuntime;
+  }
+}
+
+unexpected<Failure> failWith(int exitCode, std::string code, std::string message) {
+  return unexpected<Failure>(Failure{std::move(code), std::move(message), 0, exitCode});
+}
+
+unexpected<Failure> usageError(std::string message) {
+  return failWith(kExitUsage, "Usage", std::move(message));
+}
+
+unexpected<Failure> fromError(const Error &error) {
+  return unexpected<Failure>(
+      Failure{errorCodeName(error.code), error.message, error.sysError, exitCodeFor(error.code)});
+}
+
+void Context::applyGlobals() {
+  output.setJson(options.json);
+  spdlog::set_level(options.verbose ? spdlog::level::debug : spdlog::level::info);
+}
+
+Outcome<net::Endpoint> Context::explicitEndpoint(bool forXell) const {
+  if (!options.target.empty() && !options.ip.empty()) {
+    return usageError("--target and --ip are mutually exclusive");
+  }
+  if (forXell && options.port) {
+    return usageError("--port selects the UpdServer port; use --xell-port for xell commands");
+  }
+  if (!forXell && options.xellPort) {
+    return usageError("--xell-port only applies to xell commands; use --port for UpdServer");
+  }
+
+  const std::string &spec = options.target.empty() ? options.ip : options.target;
+  auto parsed = net::Endpoint::parse(spec);
+  if (!parsed) return usageError("invalid target '" + spec + "': " + parsed.error().message);
+  net::Endpoint endpoint = std::move(*parsed);
+
+  const std::optional<uint16_t> &selected = forXell ? options.xellPort : options.port;
+  if (selected) {
+    if (endpoint.port != 0 && endpoint.port != *selected) {
+      return usageError("conflicting ports: target says " + std::to_string(endpoint.port) + ", option says " +
+                        std::to_string(*selected));
+    }
+    endpoint.port = *selected;
+  }
+  if (endpoint.port == 0 && lowered(endpoint.scheme) == "tcp") {
+    endpoint.port = forXell ? xell::kXellHttpPort : updserver::NANDSVR_PORT;
+  }
+  if (options.timeoutMs) endpoint.timeout = std::chrono::milliseconds(*options.timeoutMs);
+
+  if (auto registered = checkSchemeRegistered(endpoint); !registered) return unexpected<Failure>(registered.error());
+  return endpoint;
+}
+
+Outcome<net::Endpoint> Context::resolveUpdServerEndpoint() const {
+  if (hasExplicitTarget()) return explicitEndpoint(false);
+  if (options.xellPort) {
+    return usageError("--xell-port only applies to xell commands; use --port for UpdServer");
+  }
+
+  const auto timeout = std::chrono::milliseconds(options.discoveryTimeoutMs);
+  spdlog::info("No target specified; looking for an UpdServer console (UDP port {}, up to {} ms)...",
+               updserver::ANNC_PORT, timeout.count());
+  auto found = discovery::DiscoveryRegistry::instance().discoverAll(timeout, true);
+  if (!found) {
+    return failWith(kExitDiscovery, "DiscoveryFailed",
+                    "automatic discovery is unavailable: " + found.error().message +
+                        "; pass --target or --ip to skip discovery");
+  }
+
+  for (const auto &device : *found) {
+    if (device.protocol != "updserver") continue;
+    net::Endpoint endpoint;
+    endpoint.scheme = "tcp";
+    endpoint.host = device.address;
+    endpoint.port = updserver::NANDSVR_PORT;
+    if (auto it = device.info.find("port"); it != device.info.end()) {
+      unsigned port = 0;
+      const auto [ptr, ec] = std::from_chars(it->second.data(), it->second.data() + it->second.size(), port);
+      if (ec == std::errc{} && ptr == it->second.data() + it->second.size() && port > 0 && port <= 65535) {
+        endpoint.port = static_cast<uint16_t>(port);
+      }
+    }
+    if (options.port) endpoint.port = *options.port;
+    if (options.timeoutMs) endpoint.timeout = std::chrono::milliseconds(*options.timeoutMs);
+    spdlog::info("Using discovered console at {}", endpoint.toString());
+    if (auto registered = checkSchemeRegistered(endpoint); !registered) return unexpected<Failure>(registered.error());
+    return endpoint;
+  }
+
+  return failWith(kExitDiscovery, "NoDevices",
+                  "no UpdServer console answered within " + std::to_string(timeout.count()) +
+                      " ms; pass --target or --ip to name one");
+}
+
+Outcome<net::Endpoint> Context::resolveXellEndpoint() const {
+  if (!hasExplicitTarget()) {
+    return usageError("xell commands need --target or --ip: XeLL does not announce itself, so it is never auto-discovered");
+  }
+  return explicitEndpoint(true);
+}
+
+Outcome<void> Context::requireConfirmationPossible() const {
+  if (options.yes || interactive()) return {};
+  return usageError("this command is destructive; pass --yes to run it without an interactive terminal");
+}
+
+Outcome<void> Context::confirmDestructive(const std::string &action, const std::string &target) const {
+  if (options.yes) return {};
+  if (!interactive()) {
+    return usageError("this command is destructive; pass --yes to run it without an interactive terminal");
+  }
+  std::cerr << "WARNING: about to " << action << " on " << target << ".\n"
+            << "This changes the console and cannot be undone. Type 'yes' to continue: " << std::flush;
+  std::string answer;
+  std::getline(std::cin, answer);
+  if (lowered(answer) != "yes") {
+    return failWith(kExitRuntime, "Aborted", "not confirmed; nothing was sent");
+  }
+  return {};
+}
+
+void Context::finish(const Outcome<void> &outcome) {
+  if (outcome) return;
+  const Failure &failure = outcome.error();
+  spdlog::error("{}: {}{}", failure.code, failure.message,
+                failure.sysError != 0 ? " (os error " + std::to_string(failure.sysError) + ")" : "");
+  output.error(failure.code, failure.message, failure.sysError);
+  exitCode = failure.exitCode;
+}
+
+} // namespace updclient::cli

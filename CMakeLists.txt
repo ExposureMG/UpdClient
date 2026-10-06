@@ -1,34 +1,52 @@
 cmake_minimum_required(VERSION 3.20)
-project(UpdClient LANGUAGES CXX)
+project(UpdClient VERSION 0.1.0 LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    set(UPDCLIENT_IS_TOP_LEVEL ON)
+else()
+    set(UPDCLIENT_IS_TOP_LEVEL OFF)
+endif()
 
+option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
+option(UPDCLIENT_BUILD_CLI "Build the updclient command line tool" ON)
+option(UPDCLIENT_BUILD_TESTS "Build the test suite" ${UPDCLIENT_IS_TOP_LEVEL})
+option(UPDCLIENT_WARNINGS "Enable extra compiler warnings" ${UPDCLIENT_IS_TOP_LEVEL})
+option(UPDCLIENT_INSTALL "Generate install and export rules" ${UPDCLIENT_IS_TOP_LEVEL})
+option(UPDCLIENT_USE_STD_EXPECTED "Use std::expected instead of tl::expected (needs a C++23 standard library and CMAKE_CXX_STANDARD 23)" OFF)
+
+if(UPDCLIENT_IS_TOP_LEVEL)
+    if(NOT DEFINED CMAKE_CXX_STANDARD)
+        set(CMAKE_CXX_STANDARD 20)
+    endif()
+    set(CMAKE_CXX_STANDARD_REQUIRED ON)
+    set(CMAKE_CXX_EXTENSIONS OFF)
+endif()
+
+if(BUILD_SHARED_LIBS)
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif()
+
+include(GNUInstallDirs)
 include(FetchContent)
 
-# 1. CLI11
 FetchContent_Declare(
     cli11
     GIT_REPOSITORY https://github.com/CLIUtils/CLI11.git
     GIT_TAG        v2.4.2
 )
 
-# 2. spdlog
 FetchContent_Declare(
     spdlog
     GIT_REPOSITORY https://github.com/gabime/spdlog.git
     GIT_TAG        v1.14.1
 )
 
-# 3. nlohmann_json
 FetchContent_Declare(
     json
     GIT_REPOSITORY https://github.com/nlohmann/json.git
     GIT_TAG        v3.11.3
 )
 
-# 4. tl::expected for C++20 compatibility
 FetchContent_Declare(
     expected
     GIT_REPOSITORY https://github.com/TartanLlama/expected.git
@@ -36,50 +54,103 @@ FetchContent_Declare(
 )
 
 set(EXPECTED_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(EXPECTED_BUILD_PACKAGE OFF CACHE BOOL "" FORCE)
+set(SPDLOG_INSTALL ${UPDCLIENT_INSTALL} CACHE BOOL "")
 
-if(NOT TARGET CLI11)
-    FetchContent_MakeAvailable(cli11)
-endif()
 if(NOT TARGET spdlog)
     FetchContent_MakeAvailable(spdlog)
 endif()
-if(NOT TARGET nlohmann_json)
-    FetchContent_MakeAvailable(json)
+
+# spdlog 1.14's bundled fmt 10.2 does not compile its consteval format-string checks
+# under recent Clang releases; fall back to fmt's non-consteval path there.
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    foreach(updclient_spdlog_target spdlog spdlog_header_only)
+        if(TARGET ${updclient_spdlog_target})
+            get_target_property(updclient_spdlog_imported ${updclient_spdlog_target} IMPORTED)
+            get_target_property(updclient_spdlog_type ${updclient_spdlog_target} TYPE)
+            if(NOT updclient_spdlog_imported)
+                if(updclient_spdlog_type STREQUAL "INTERFACE_LIBRARY")
+                    target_compile_definitions(${updclient_spdlog_target} INTERFACE FMT_CONSTEVAL=)
+                else()
+                    target_compile_definitions(${updclient_spdlog_target} PUBLIC FMT_CONSTEVAL=)
+                endif()
+            endif()
+        endif()
+    endforeach()
 endif()
-if(NOT TARGET expected)
+
+if(UPDCLIENT_USE_STD_EXPECTED)
+    include(CheckCXXSourceCompiles)
+    check_cxx_source_compiles("
+#include <version>
+#if !defined(__cpp_lib_expected) || __cpp_lib_expected < 202211L
+#error no std::expected
+#endif
+#include <expected>
+int main() { std::expected<int, int> e(1); return *e - 1; }
+" UPDCLIENT_HAVE_STD_EXPECTED)
+    if(NOT UPDCLIENT_HAVE_STD_EXPECTED)
+        message(FATAL_ERROR "UPDCLIENT_USE_STD_EXPECTED is ON but std::expected is not available with the current compiler and CMAKE_CXX_STANDARD")
+    endif()
+elseif(NOT TARGET tl::expected)
     FetchContent_MakeAvailable(expected)
 endif()
+if(UPDCLIENT_BUILD_CLI)
+    if(NOT TARGET CLI11::CLI11)
+        FetchContent_MakeAvailable(cli11)
+    endif()
+    if(NOT TARGET nlohmann_json::nlohmann_json)
+        FetchContent_MakeAvailable(json)
+    endif()
+endif()
 
-option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
-option(UPDCLIENT_BUILD_CLI "Build CLI executable" ON)
+function(updclient_apply_warnings target)
+    if(UPDCLIENT_WARNINGS)
+        if(MSVC)
+            target_compile_options(${target} PRIVATE /W4)
+        else()
+            target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+        endif()
+    endif()
+endfunction()
 
-# Library target
-add_library(updclient_lib
-    src/network/tcp_socket.cpp
-    src/network/udp_listener.cpp
-    src/updserver/updserver_client.cpp
-    src/updserver/updserver_discovery.cpp
-    src/xell/xell_client.cpp
-    src/xell/xell_discovery.cpp
-)
+# Library: every .cpp under src/ except the CLI. Adding a file needs no CMake edit.
+file(GLOB_RECURSE UPDCLIENT_LIB_SOURCES CONFIGURE_DEPENDS RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} src/*.cpp)
+list(FILTER UPDCLIENT_LIB_SOURCES EXCLUDE REGEX "^src/(main\\.cpp$|cli/)")
+file(GLOB_RECURSE UPDCLIENT_CLI_SOURCES CONFIGURE_DEPENDS RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} src/cli/*.cpp)
 
+add_library(updclient_lib ${UPDCLIENT_LIB_SOURCES})
 add_library(UpdClient::updclient_lib ALIAS updclient_lib)
 
-target_include_directories(updclient_lib PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}
+target_compile_features(updclient_lib PUBLIC cxx_std_20)
+set_target_properties(updclient_lib PROPERTIES
+    CXX_EXTENSIONS OFF
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON
+    VERSION ${PROJECT_VERSION}
+    SOVERSION ${PROJECT_VERSION_MAJOR}
 )
 
-target_link_libraries(updclient_lib PUBLIC
-    spdlog::spdlog
-    nlohmann_json::nlohmann_json
-    tl::expected
+target_include_directories(updclient_lib
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
-if(WIN32 OR MINGW)
-    target_link_libraries(updclient_lib PUBLIC ws2_32)
-    add_compile_definitions(_WIN32_WINNT=0x0600)
+target_link_libraries(updclient_lib PRIVATE spdlog::spdlog)
+
+# Part of the library's ABI: consumers see the same definition as the library.
+if(UPDCLIENT_USE_STD_EXPECTED)
+    target_compile_definitions(updclient_lib PUBLIC UPDCLIENT_USE_STD_EXPECTED)
+else()
+    target_link_libraries(updclient_lib PUBLIC tl::expected)
+endif()
+
+if(WIN32)
+    target_compile_definitions(updclient_lib PRIVATE _WIN32_WINNT=0x0600 WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_link_libraries(updclient_lib PRIVATE ws2_32)
 endif()
 
 if(BUILD_SHARED_LIBS)
@@ -88,8 +159,71 @@ else()
     target_compile_definitions(updclient_lib PUBLIC UPDCLIENT_STATIC)
 endif()
 
-# CLI Executable target
+updclient_apply_warnings(updclient_lib)
+
+# CLI: the only target that depends on CLI11 and nlohmann_json.
 if(UPDCLIENT_BUILD_CLI)
-    add_executable(updclient src/main.cpp)
-    target_link_libraries(updclient PRIVATE updclient_lib CLI11::CLI11)
+    add_executable(updclient src/main.cpp ${UPDCLIENT_CLI_SOURCES})
+    set_target_properties(updclient PROPERTIES CXX_EXTENSIONS OFF)
+    target_include_directories(updclient PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(updclient PRIVATE
+        UpdClient::updclient_lib
+        CLI11::CLI11
+        nlohmann_json::nlohmann_json
+        spdlog::spdlog
+    )
+    updclient_apply_warnings(updclient)
+endif()
+
+if(UPDCLIENT_BUILD_TESTS AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
+
+if(UPDCLIENT_INSTALL)
+    include(CMakePackageConfigHelpers)
+
+    install(TARGETS updclient_lib
+        EXPORT UpdClientTargets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+        INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    )
+    install(DIRECTORY include/updclient DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    if(UPDCLIENT_BUILD_CLI)
+        install(TARGETS updclient RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    endif()
+
+    set(UPDCLIENT_CMAKE_DIR ${CMAKE_INSTALL_LIBDIR}/cmake/UpdClient)
+    install(EXPORT UpdClientTargets
+        NAMESPACE UpdClient::
+        DESTINATION ${UPDCLIENT_CMAKE_DIR}
+    )
+
+    if(BUILD_SHARED_LIBS)
+        set(UPDCLIENT_CONFIG_SHARED TRUE)
+    else()
+        set(UPDCLIENT_CONFIG_SHARED FALSE)
+    endif()
+    if(UPDCLIENT_USE_STD_EXPECTED)
+        set(UPDCLIENT_CONFIG_STD_EXPECTED TRUE)
+    else()
+        set(UPDCLIENT_CONFIG_STD_EXPECTED FALSE)
+    endif()
+    configure_package_config_file(
+        cmake/UpdClientConfig.cmake.in
+        ${CMAKE_CURRENT_BINARY_DIR}/UpdClientConfig.cmake
+        INSTALL_DESTINATION ${UPDCLIENT_CMAKE_DIR}
+    )
+    write_basic_package_version_file(
+        ${CMAKE_CURRENT_BINARY_DIR}/UpdClientConfigVersion.cmake
+        VERSION ${PROJECT_VERSION}
+        COMPATIBILITY SameMajorVersion
+    )
+    install(FILES
+        ${CMAKE_CURRENT_BINARY_DIR}/UpdClientConfig.cmake
+        ${CMAKE_CURRENT_BINARY_DIR}/UpdClientConfigVersion.cmake
+        DESTINATION ${UPDCLIENT_CMAKE_DIR}
+    )
 endif()

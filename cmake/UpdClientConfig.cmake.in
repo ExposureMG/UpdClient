@@ -1,0 +1,12 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+if(NOT @UPDCLIENT_CONFIG_STD_EXPECTED@)
+    find_dependency(tl-expected)
+endif()
+if(NOT @UPDCLIENT_CONFIG_SHARED@)
+    find_dependency(spdlog)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/UpdClientTargets.cmake")
+check_required_components(UpdClient)
