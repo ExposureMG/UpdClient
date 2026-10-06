@@ -40,6 +40,8 @@ XBDM_LINK_TEST(XbdmFaultIntegration, GreetingFaults) {
   CHECK_ERR(rig.open(impatient()), ErrorCode::Disconnected);
   rig.mock.inject(XbdmFault::statusLine("201- CONNECTED").onGreeting());
   CHECK_OK(rig.open(impatient()));
+  rig.mock.inject(XbdmFault::statusLine("201-connected").onGreeting());
+  CHECK_OK(rig.open(impatient()));
   rig.mock.inject(XbdmFault::trickleBytes().onGreeting());
   auto trickled = rig.open(impatient());
   REQUIRE_OK(trickled);
@@ -353,4 +355,47 @@ XBDM_LINK_TEST(XbdmFaultIntegration, HostileAnswers) {
   for (const auto &name : rig.mock.listNames("HDD:\\").value_or(std::vector<std::string>{})) {
     CHECK_MSG(name.find(".part") == std::string::npos || !client.pendingCleanup().empty(), name);
   }
+}
+
+// Answer shapes the mock does not produce on its own but a console might
+// (sections 1.4, 1.9, 3.3, 3.13).
+XBDM_LINK_TEST(XbdmFaultIntegration, OtherAnswerShapes) {
+  Rig rig(link);
+  auto client = rig.client();
+  rig.mock.inject(XbdmFault::reply("200-MockDevkit\n").on("dbgname"));
+  CHECK_EQ(client.debugName().value_or(""), std::string("MockDevkit"));
+  rig.mock.inject(XbdmFault::reply("202- multiline response follows\n" "drivename=\"HDD\"\n" ".\n").on("drivelist"));
+  CHECK_EQ(client.drives().value_or(std::vector<std::string>{}), std::vector<std::string>{"HDD"});
+
+  rig.mock.inject(XbdmFault::reply("202- multiline response follows\r\n"
+                                   "name=\".\" sizehi=0x0 sizelo=0x0 directory\r\n"
+                                   "name=\"..\" sizehi=0x0 sizelo=0x0 directory\r\n"
+                                   "directory sizelo=0x5 name=\"ok\" CHANGEHI=0x1 changelo=0x2 future=1 flag\r\n"
+                                   "name=\"bad\\x\" sizehi=0x0 sizelo=0x1\r\n"
+                                   "name=\"num\" sizehi=0x0 sizelo=zz\r\n"
+                                   "sizehi=0x0 sizelo=0x1\r\n"
+                                   "name=\"wide\" sizehi=0x1 sizelo=0x0\r\n"
+                                   ".\r\n")
+                       .on("dirlist"));
+  auto listing = client.list("HDD:\\");
+  REQUIRE_OK(listing);
+  REQUIRE_EQ(listing->entries.size(), size_t{2});
+  CHECK_EQ(listing->entries[0].name, std::string("ok"));
+  CHECK(listing->entries[0].isDirectory);
+  CHECK_EQ(listing->entries[0].size, 5u);
+  CHECK_EQ(listing->entries[0].changedFileTime.value_or(0), 0x100000002ull);
+  CHECK(!listing->entries[0].createdFileTime.has_value());
+  CHECK_EQ(listing->entries[1].size, 1ull << 32);
+  CHECK_EQ(listing->skipped, size_t{3});
+
+  const auto shot = rig.mock.screenshot();
+  std::string reply = "203- binary response follows\r\npitch=0x100, width=0x40, height=0x20, format=0x18280186, "
+                      "offsetx=0x0, offsety=0x0, framebuffersize=0x" +
+                      updclient::xbdm::formatNumber(shot.framebuffer.size()).substr(2) + "\r\n";
+  reply += ut::textOf(shot.framebuffer);
+  rig.mock.inject(XbdmFault::reply(reply).on("screenshot"));
+  auto commas = client.screenshot();
+  REQUIRE_OK(commas);
+  CHECK_EQ(commas->data, shot.framebuffer);
+  CHECK(client.isConnected());
 }
