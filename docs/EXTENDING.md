@@ -609,7 +609,10 @@ Register it with `acme::registerAcmeDiscovery()` next to `registerBuiltins()`, o
 `src/updclient.cpp` to make it built in. After that `updclient discover` lists its devices with no CLI
 change, because `discover` runs every registered provider and prints `protocol`, `address`, `info` and
 `last_seen`. Automatic target selection is different: `Context::resolveUpdServerEndpoint` in
-`src/cli/context.cpp` only uses devices whose `protocol` is `"updserver"`.
+`src/cli/context.cpp` only uses devices whose `protocol` is `"updserver"`. XBDM is the counterexample:
+its provider (`xbdm::XbdmDiscovery`) is not registered in the CLI, because UpdServer auto-discovery
+(`discoverAll` with `stopAfterFirst`) would then wait for it as well before giving up; `discover.cpp`
+and `Context::resolveXbdmEndpoint` run it directly.
 
 `tests/protocols/acme/discovery_test.cpp`
 
@@ -715,13 +718,17 @@ Rules for CLI commands:
   error document and sets the exit code. Use `usageError` for bad arguments (exit 2), `fromError` for
   library errors (`InvalidArgument` gives exit 2, everything else 1) and `failWith` for a specific code.
 - Logs and progress go to stderr through spdlog (`cli/progress.hpp`).
-- A destructive command passes a non-empty action text to `withUpdServer`, which makes it ask for
-  confirmation (or require `--yes`). For a new protocol, add an equivalent `withAcme` helper in
-  `cli/session.hpp` that resolves the endpoint, calls `context.confirmDestructive`, connects and runs the
-  body.
-- `Context::explicitEndpoint(bool forXell)` is written for the two existing protocols. The example
-  above parses `--target` directly; with a third protocol in regular use, generalise it (for example
-  to take the default port) instead of adding another boolean.
+- A destructive command passes a non-empty action text to `withUpdServer` (or `withXbdm`), which makes
+  it ask for confirmation (or require `--yes`). For a new protocol, add an equivalent `withAcme` helper
+  in `cli/session.hpp` that resolves the endpoint, calls `context.confirmDestructive`, connects and runs
+  the body; `withXbdm` also shows how to add `--trace` and Ctrl-C cancellation (`cli/interrupt.hpp`).
+- `Context::explicitEndpoint(Service)` applies `--target`/`--ip`/`--port`/`--timeout-ms` and the
+  service's default port. The example above parses `--target` directly; for a protocol in regular use,
+  add a `Service` value and a `resolveAcmeEndpoint` next to `resolveXbdmEndpoint`.
+- If the new protocol does what an existing command does (as XBDM does for `file get`), dispatch inside
+  that command on the target's scheme (`Context::targetsXbdm()` in `file.cpp`, `mem.cpp`, `power.cpp`,
+  `info.cpp`) instead of adding a duplicate command, and let `resolveUpdServerEndpoint` refuse the
+  scheme so UpdServer-only commands fail with a usage error.
 - Document the command in the README command table.
 
 ## Known limitations
@@ -735,7 +742,18 @@ Rules for CLI commands:
   XeLL has no discovery; `xell::XellProbeProvider` probes endpoints you list and is not registered by
   default or used by the CLI.
 - `registerBuiltins()` registers only `tcp` and UpdServer discovery. Other transports and providers need
-  an explicit `registerXxx()` call.
+  an explicit `registerXxx()` call (XBDM: `xbdm::registerXbdm()` or `registerXbdmScheme()`).
+- XBDM has been run only against `tests/support/xbdm_mock_server`, never against a console or an
+  emulator; [HARDWARE_TEST_PLAN.md](HARDWARE_TEST_PLAN.md) lists what is still to be checked. The
+  client deviates from the contract of [XBDM_PROTOCOL.md](XBDM_PROTOCOL.md) in a few deliberate places:
+  it never reconnects on its own (spec 1.13 asks for one transparent retry; call `reconnect()`), it does
+  not retry after a 401 (1.12), `rename` may move between folders of one drive (3.10), discovery uses
+  one wildcard socket instead of one per interface (2.2), and `consoleInfo()` does not try `systeminfo`
+  or `dmversion` (3.1).
+- XBDM notifications (`notify`, section 3.18), breakpoints and execution control (`stop`, `go`,
+  `suspend`, `resume`) have no client API yet; `rawCommand` reaches the single-line ones. Screenshots are
+  returned still tiled. `getmem` is not used automatically when `getmemex` is missing; the CLI's
+  `mem peek` falls back on 407.
 - Timeouts apply to each connect and each read or write call, not to a whole transfer.
 - Many UpdServer commands are not acknowledged; success means "sent". The protocol has no framing, so
   a failed exchange closes the connection.
@@ -744,8 +762,8 @@ Rules for CLI commands:
 - Clients and transports are not thread-safe, except `ITransport::close()` and `isOpen()`; the two
   registries are.
 - A TCP connect cannot be cancelled from another thread; it is bounded by `Endpoint::timeout`.
-- `Context::explicitEndpoint` and `resolveUpdServerEndpoint` in the CLI know two protocols and treat
-  discovered devices as `tcp` endpoints.
+- `Context::explicitEndpoint` knows three services; `resolveUpdServerEndpoint` treats discovered devices
+  as `tcp` endpoints.
 - The library has a C++ API only. A shared build exports `UPDCLIENT_API` symbols that use `std::string`
   and `std::map`, so the library and its users must be built with the same compiler and standard library.
 - Verified here: GCC and Clang on Linux, MinGW-w64 cross build (build only). macOS and MSVC are not
@@ -797,6 +815,16 @@ this matters for new devices and protocols.
   `CMakeLists.txt`.
 - UpdServer over a non-IP medium also needs a decision about the announcement/discovery path, which is
   UDP-only today.
+
+### XBDM after the hardware tests
+
+- `src/protocols/xbdm/client.cpp`: settle each `**[none]**` of `docs/XBDM_PROTOCOL.md` section 6 from the
+  reports of `docs/HARDWARE_TEST_PLAN.md`, and adjust `tests/support/xbdm_mock_server.cpp` and its tests
+  to the observed answers.
+- Notifications: add a `NotificationChannel` class to `include/updclient/protocols/xbdm/` that opens its
+  own connection, sends `notify` and parses the event lines of section 3.18; the mock already sends them
+  (`XbdmMockServer::notify`).
+- Screenshots: an untiler for format 8888 (spec 3.13) next to `screenshot()`.
 
 ### New console protocols
 

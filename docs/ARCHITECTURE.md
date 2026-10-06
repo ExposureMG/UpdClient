@@ -4,7 +4,7 @@ UpdClient is a C++20 library (`updclient_lib`) and a thin CLI (`updclient`). The
 three concerns that vary independently:
 
 - transports: how bytes move (`net::ITransport`, `net::IDatagramSocket`);
-- protocols: what the bytes mean (`updserver::UpdServerClient`, `xell::XellClient`);
+- protocols: what the bytes mean (`updserver::UpdServerClient`, `xell::XellClient`, `xbdm::XbdmClient`);
 - discovery: how devices are found (`discovery::IDiscoveryProvider`).
 
 Each axis is an interface plus a registry or an injection point. Adding a transport, protocol or
@@ -25,6 +25,7 @@ include/updclient/
   protocols/
     updserver/ protocol.hpp client.hpp discovery.hpp
     xell/      client.hpp discovery.hpp
+    xbdm/      protocol.hpp path.hpp client.hpp discovery.hpp
   updclient.hpp              umbrella header and registerBuiltins()
 src/
   core/ net/ discovery/ protocols/ updclient.cpp   library sources (mirror include/)
@@ -39,7 +40,7 @@ cmake/UpdClientConfig.cmake.in                     package config template
 ```
           src/cli, src/main.cpp            CLI11, nlohmann_json
                     |
-     protocols/updserver, protocols/xell   one directory per protocol
+  protocols/updserver, xell, xbdm         one directory per protocol
             |                  |
        discovery/       net/  endpoint, transport, registry, tcp, udp, http_lite
             |                  |
@@ -69,8 +70,8 @@ These rules hold in the tree today and are checked by `grep -r '#include' includ
   nlohmann_json, and none includes a header under `src/`.
 - `net/platform/socket_platform.hpp` is included only by `src/net/platform/socket_platform.cpp`,
   `src/net/tcp_transport.cpp` and `src/net/udp_socket.cpp`.
-- `protocols/updserver` and `protocols/xell` do not include each other. They share only `core/`,
-  `net/` and `discovery/`.
+- `protocols/updserver`, `protocols/xell` and `protocols/xbdm` do not include each other. They share
+  only `core/`, `net/` and `discovery/`.
 - Nothing outside `src/cli/` and `src/main.cpp` includes CLI11 or nlohmann_json. Only the `updclient`
   target links them.
 - spdlog is linked `PRIVATE` to `updclient_lib` and appears only in `.cpp` files and CLI sources.
@@ -156,7 +157,18 @@ A protocol client takes its byte stream by injection and never constructs a sock
   asks the connector for a fresh transport. The object holds no connection and is reusable.
   `forEndpoint(const Endpoint &)` builds one whose connector calls `TransportRegistry::connect`, with
   port 80 as default. `parseXellInfo` is a pure function over the index page HTML.
-- Both clients use `core/hex.hpp` and `net/` only.
+- `xbdm::XbdmClient`: the Xbox debug monitor on TCP port 730, specified in
+  [XBDM_PROTOCOL.md](XBDM_PROTOCOL.md). One client is one connection with one command in flight, never
+  pipelined. `connect(endpoint)` takes `xbdm://host[:port]` (TCP directly) or any registered scheme;
+  `open(connector)` and `attach(transport, ...)` take the transport by injection, and `reconnect()` uses
+  the connector again. A 4xx answer is an error carrying the status (`consoleStatusCode`) and keeps the
+  connection; every other failure closes it, and the client never reconnects on its own. `FileReader`
+  (`getfile`) and `FileWriter` (`sendfile`) stream transfers and own the connection while open; an
+  upload goes to `<name>.<8 hex>.part` and is renamed after the console's 200, and temporary names left
+  by a drop are deleted by the next `reconnect()`. `protocol.hpp` holds the wire constants and parsers
+  (no I/O), `path.hpp` the console path rules. `ClientOptions` bounds every length the console sends and
+  carries the timeouts and an optional trace hook. `rawCommand` sends a line as typed, for diagnostics.
+- The clients use `core/hex.hpp` and `net/` only.
 
 ## Discovery
 
@@ -171,11 +183,18 @@ A protocol client takes its byte stream by injection and never constructs a sock
 - `xell::XellProbeProvider`: probes a caller-supplied list of endpoints over HTTP and recognises XeLL by
   content. It is not registered by `registerBuiltins()`, because XeLL does not announce itself and the
   library never scans subnets on its own.
+- `xbdm::XbdmDiscovery`: broadcasts the XBDM name query (type 3) to UDP port 730 through an injectable
+  `DatagramSocketFactory`, de-duplicates replies by address and asks each console its `dbgname` over
+  TCP through an injectable connector. `findByName` (type 1) and `probeAddress` (one address) narrow
+  it; `xbdm::identify(endpoint)` connects by address alone. `registerXbdmDiscovery()` adds it; it is
+  not in `registerBuiltins()`.
 
 ## Registration
 
 `updclient::registerBuiltins()` (`updclient.hpp`, `src/updclient.cpp`) registers the `tcp` scheme and the
-UpdServer discovery provider in the process-wide registries, guarded by `std::call_once`. Nothing is
+UpdServer discovery provider in the process-wide registries, guarded by `std::call_once`. XBDM ships
+`xbdm::registerXbdmScheme()` (the `xbdm` scheme: TCP, port 730 by default), `registerXbdmDiscovery()`
+and `registerXbdm()` for both. Nothing is
 registered by static initialisation, so linking a static library never changes behaviour behind the
 caller's back. A new transport or provider ships its own `registerXxx(registry = instance())` function in
 its own header; applications call it next to `registerBuiltins()`. Promoting it to a built-in is a
@@ -186,21 +205,31 @@ one-line edit in `src/updclient.cpp`.
 `src/cli/` is the only code that depends on CLI11 and nlohmann_json.
 
 - `main.cpp` calls `cli::run`; `app.cpp` sets the spdlog default logger to stderr, calls
-  `registerBuiltins()`, declares the global options and one `registerXxxCommands` function per command
-  group (declared in `commands.hpp`).
+  `registerBuiltins()` and `xbdm::registerXbdmScheme()`, declares the global options and one
+  `registerXxxCommands` function per command group (declared in `commands.hpp`).
 - `context.{hpp,cpp}`: `Context` holds the global options, the `Output` writer and the exit code. It turns
-  `--target`/`--ip`/`--port`/`--xell-port`/`--timeout-ms` into a `net::Endpoint`, runs UpdServer
-  auto-discovery through `DiscoveryRegistry`, and implements the destructive-command confirmation.
-- `session.{hpp,cpp}`: `withUpdServer` (resolve, confirm, connect, run) and `withXell`.
+  `--target`/`--ip`/`--port`/`--xell-port`/`--timeout-ms` into a `net::Endpoint` for a `Service`
+  (UpdServer, XeLL or XBDM, which decides the default port), runs UpdServer auto-discovery through
+  `DiscoveryRegistry` and XBDM auto-discovery through `XbdmDiscovery`, and implements the
+  destructive-command confirmation. `targetsXbdm()` is true for an `xbdm://` target: the shared
+  commands then take the XBDM path, and `resolveUpdServerEndpoint` refuses the target.
+- `session.{hpp,cpp}`: `withUpdServer` (resolve, confirm, connect, run), `withXell` and `withXbdm`, which
+  also opens the `--trace` file, installs the Ctrl-C handler (`interrupt.{hpp,cpp}`: the handler sets a
+  flag, a watcher thread calls `XbdmClient::cancel()`) and deletes an interrupted upload's temporary
+  file afterwards.
+- `xbdm.{hpp,cpp}`: the XBDM halves of `file get/send/mkdir`, `mem peek/poke`, `power reboot/shutdown`
+  and `info`, and the `xbdm` group. `trace.{hpp,cpp}` writes `--trace` files from
+  `xbdm::ClientOptions::trace`.
 - `output.{hpp,cpp}`: everything on stdout goes through `Output`, which enforces the one-JSON-document
   contract.
 - `args.{hpp,cpp}`, `fileio.{hpp,cpp}`, `progress.hpp`, `version.hpp`: number parsing, atomic file writes,
   throttled progress on stderr, version string.
 - One file per command group: `discover.cpp`, `info.cpp`, `power.cpp`, `nand.cpp`, `mem.cpp`, `file.cpp`,
-  `xell.cpp`.
+  `xell.cpp`, `xbdm.cpp`.
 
 The CLI maps `ErrorCode::InvalidArgument` to exit code 2 and every other error to 1; discovery failures
-use 3. See the README for the table.
+use 3. An XBDM refusal is reported with its status (`console_status` in JSON). See the README for the
+table.
 
 ## Build system
 
@@ -252,6 +281,10 @@ close until it returns. It is bounded by `Endpoint::timeout`.
 `XellClient` is stateless apart from its connector, so concurrent calls are only as safe as the
 connector.
 
+`XbdmClient` is not thread-safe either, except `cancel()` (and `FileReader::cancel()`,
+`FileWriter::cancel()`), which close the connection from any thread; the call in progress then fails
+with `Cancelled`. Parallel work needs one client per thread, each with its own connection.
+
 ## Logging
 
 The library logs through the spdlog default logger, only inside `.cpp` files. The CLI installs a stderr
@@ -271,11 +304,19 @@ tests/net/                         endpoint, transport helpers, registry, http_l
 tests/discovery/                   discovery registry
 tests/protocols/updserver/         client, discovery
 tests/protocols/xell/              client, discovery
+tests/protocols/xbdm/              client_*: the client against its own scripted fake (client_fake.hpp);
+                                   mock_server_test: the mock on its own, with raw bytes;
+                                   integration_*: the client against the mock, each test over an
+                                   in-memory pipe and over loopback TCP
+tests/cli/                         the updclient executable against the XBDM mock (when the CLI is built)
 tests/support/mock_transport.hpp   MockScript / MockTransport: scripted reads, expected writes, fault injection
 tests/support/memory_transport.hpp MemoryPipe: two connected blocking in-memory transports (cancellation,
                                    a mock server on another thread, no sockets)
 tests/support/fake_datagram_socket.hpp   FakeDatagrams: scripted UDP source
 tests/support/loopback_server.hpp  throwaway TCP server on 127.0.0.1
+tests/support/xbdm_mock_server.*   XbdmMockServer: an XBDM console (section 5.1 of XBDM_PROTOCOL.md)
+                                   with drives, files, memory, fault injection and a UDP name responder,
+                                   over MemoryPipe or a loopback TCP listener
 ```
 
 Because protocol clients and discovery take their I/O by injection, nearly every protocol path is tested

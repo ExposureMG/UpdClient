@@ -14,11 +14,18 @@ A C++20 library and command line tool for talking to an Xbox 360 over the networ
 | --- | --- | --- |
 | UpdServer | TCP, default port 49. Discovery: UDP broadcast on port 48 | Console info and keys, NAND dump and raw block read/write/erase, bad block list, physical and hypervisor peek/poke, 1BL and bootloader dumps, file get/send, mount/unmount/mkdir, reboot/SMC reset/shutdown |
 | XeLL (Reloaded HTTPD) | HTTP/1.0 over TCP, default port 80. No discovery: you name the console | CPU key, DVD key and colours from the index page, NAND flash dump (`/FLASH`), fuse listing, keyvault (`/KV`, `/KVRAW`, `/KVRAW2`) |
+| XBDM (Xbox debug monitor: devkits, RGH/JTAG/Glitch2 consoles with an XBDM plugin, emulators that offer it) | Line protocol over TCP, port 730, scheme `xbdm://`. Discovery: UDP name protocol on port 730 | Console information, drives and free space, folder listings, file attributes, download and upload with 64-bit sizes, mkdir, delete, rename, memory read (`getmem`, `getmemex`) and write, memory regions, modules and sections, screenshot (raw frame buffer), reboot, launch, shutdown, tray, clock |
 
 DashLaunch is not supported.
 
-Transports are looked up by URI scheme. Only `tcp` is built in; adding another (serial, USB, TLS)
-means adding files, see [docs/EXTENDING.md](docs/EXTENDING.md).
+Transports are looked up by URI scheme. Only `tcp` is built in; `xbdm` (TCP with port 730 as the
+default) is registered by `xbdm::registerXbdmScheme()`. Adding another (serial, USB, TLS) means adding
+files, see [docs/EXTENDING.md](docs/EXTENDING.md).
+
+The XBDM client follows [docs/XBDM_PROTOCOL.md](docs/XBDM_PROTOCOL.md), a contract written from
+third-party clients. It has been tested only against a mock console (`tests/support/xbdm_mock_server`),
+never against hardware; [docs/HARDWARE_TEST_PLAN.md](docs/HARDWARE_TEST_PLAN.md) is the checklist that
+settles the open questions on real consoles.
 
 ## Build
 
@@ -184,10 +191,18 @@ The suite uses a small built-in harness (no third-party framework). Protocol and
 against scripted fakes (`tests/support/mock_transport.hpp`, `tests/support/fake_datagram_socket.hpp`),
 so they need no console and no network; a few tests use a loopback TCP server on `127.0.0.1`.
 
+The XBDM tests also run the client against `tests/support/xbdm_mock_server.{hpp,cpp}`, an in-memory
+console with fault injection, twice per test: over an in-memory pipe and over loopback TCP (a TCP variant
+is skipped with a message where sockets are refused). With the CLI built, `tests/cli/` runs the
+`updclient` executable against the same mock. `UPDCLIENT_XBDM_HUGE=1` adds a test that moves 4 GiB + 1
+in each direction over loopback (slow; it needs no disk space beyond a sparse file).
+
 ## Using the library
 
 Link `UpdClient::updclient_lib` and include the umbrella header. Call `registerBuiltins()` once; it
 registers the `tcp` transport and the UpdServer discovery provider and is safe to call repeatedly.
+XBDM needs `xbdm::registerXbdm()` as well (the `xbdm` scheme and the XBDM discovery provider), or only
+`xbdm::registerXbdmScheme()`.
 
 ```cmake
 set(UPDCLIENT_BUILD_CLI OFF CACHE BOOL "")
@@ -243,6 +258,43 @@ int main() {
 }
 ```
 
+XBDM keeps one connection per client and answers every command:
+
+```cpp
+#include <updclient/updclient.hpp>
+
+#include <iostream>
+
+using namespace updclient;
+
+int main() {
+  registerBuiltins();
+  xbdm::registerXbdmScheme();
+
+  auto endpoint = net::Endpoint::parse("xbdm://192.168.1.50");  // port 730
+  if (!endpoint) return 2;
+  auto client = xbdm::XbdmClient::connect(*endpoint);
+  if (!client) {
+    std::cerr << formatError(client.error()) << "\n";
+    return 1;
+  }
+  if (auto name = client->debugName()) std::cout << "console: " << *name << "\n";
+
+  auto listing = client->list("HDD:\\");
+  if (listing) {
+    for (const auto &entry : listing->entries) std::cout << entry.name << " " << entry.size << "\n";
+  } else if (auto status = xbdm::consoleStatusCode(listing.error())) {
+    std::cerr << "refused with " << *status << "\n";  // a 4xx: the connection is still usable
+  }
+
+  // Uploads go to a temporary name and are renamed after the console confirmed the data.
+  auto sent = client->uploadFromFile("save.bin", "HDD:\\Content\\save.bin",
+                                     [](uint64_t done, uint64_t total) { std::cerr << done << "/" << total << "\r"; });
+  if (!sent) std::cerr << formatError(sent.error()) << "\n";
+  return 0;
+}
+```
+
 Things to know:
 
 - `Result<T>` is `expected<T, Error>`. `Error` carries an `ErrorCode` (`Unknown`, `InvalidArgument`,
@@ -274,6 +326,15 @@ Things to know:
   `std::string` path is read in the ANSI code page.
 - Discovery: `discovery::DiscoveryRegistry::instance().discoverAll(std::chrono::seconds(3))` returns
   the `DiscoveredDevice` list from every registered provider.
+- XBDM (`include/updclient/protocols/xbdm/client.hpp`): a 4xx answer is an error that carries the status
+  (`xbdm::consoleStatusCode(error)`) and leaves the connection usable; any other failure (timeout,
+  malformed answer, drop, `cancel()`) closes it, and the client never reconnects on its own: call
+  `reconnect()`, which also deletes temporary files left by interrupted uploads. While a `FileReader` or
+  `FileWriter` is open it owns the connection; open a second client for parallel work (the console
+  limits connections and refuses with 401). `cancel()`, `FileReader::cancel()` and
+  `FileWriter::cancel()` may be called from any thread. Console paths are `HDD:\dir\file`;
+  `xbdm::toConsolePath` converts `/HDD/dir/file`. `ClientOptions::trace` receives every command and
+  text line, and the size of binary data, never its bytes.
 - The library logs through spdlog, which stays out of the public headers. A library user can set
   their own default logger; the CLI sends it to stderr.
 
@@ -289,38 +350,59 @@ Global options may appear before or after the command.
 | --- | --- |
 | `-t, --target <uri>` | Target such as `tcp://192.168.1.5:49` or a bare IP. |
 | `-i, --ip <addr>` | Shortcut for a tcp target; mutually exclusive with `--target`. |
-| `-p, --port <n>` | UpdServer TCP port, default 49. Rejected for `xell` commands. |
+| `-p, --port <n>` | UpdServer TCP port, default 49; for XBDM targets the TCP port, default 730. Rejected for `xell` commands. |
 | `--xell-port <n>` | XeLL HTTP port, default 80. Rejected for UpdServer commands. |
 | `--timeout-ms <n>` | Connect and I/O timeout, 0 for none, default 5000. |
 | `--discovery-timeout-ms <n>` | How long discovery listens, default 3000. |
 | `-j, --json` | Print results and errors as one JSON document. |
 | `-v, --verbose` | Debug logging on stderr. |
 | `--yes` | Skip the confirmation required by destructive commands. |
+| `--trace <file>` | Append every XBDM command line and every line received to the file, with timings; file contents are never written, only their size. See [docs/HARDWARE_TEST_PLAN.md](docs/HARDWARE_TEST_PLAN.md). |
 | `--version`, `-h, --help` | Version and help (`updclient <command> --help` for a command). |
 
 Numbers accept decimal (`4096`) or `0x`-prefixed hex (`0x1000`). UpdServer commands use the `--target`
 or `--ip` console, or discover one when neither is given. `xell` commands never auto-discover.
 
+The protocol follows the target: with `--target xbdm://host[:port]` the commands marked "UpdServer or
+XBDM" below speak XBDM, and UpdServer-only commands refuse the target (exit 2). The `xbdm` group always
+speaks XBDM; there a bare host (`--target 192.168.1.50` or `--ip`) means `xbdm://`, and without a target
+the first console found by XBDM discovery is used. Console paths are `HDD:\dir\file` or
+`/HDD/dir/file`. During an XBDM command Ctrl-C cancels the transfer in progress (exit 1); an interrupted
+upload's temporary file is deleted over a new connection, or named in a warning.
+
 | Command | Protocol | What it does | Confirms |
 | --- | --- | --- | --- |
-| `discover` | UpdServer | List consoles that announce themselves | |
-| `info` | UpdServer | Kernel version, NAND geometry, pairing data, CPU and DVD keys | |
+| `discover [--protocol all\|updserver\|xbdm]` | UpdServer and XBDM | List consoles that announce themselves (UpdServer) or answer the XBDM name query | |
+| `info` | UpdServer or XBDM | UpdServer: kernel version, NAND geometry, pairing data, CPU and DVD keys. XBDM: debug name, console type and id, running title, execution state, title address | |
 | `version` | UpdServer | UpdServer version on the console | |
-| `power reboot` / `smc-reset` / `shutdown` | UpdServer | Reboot, SMC reset or shut down the console | yes |
+| `power reboot` / `shutdown` | UpdServer or XBDM | Reboot (XBDM: warm `magicboot`) or shut down the console | yes |
+| `power smc-reset` | UpdServer | SMC reset | yes |
 | `nand dump [-o file]` | UpdServer | Dump the full NAND (default `nanddump.bin`) | |
 | `nand badblocks` | UpdServer | List bad blocks | |
 | `nand read-block <block> [count] [-o file]` | UpdServer | Hex dump to stdout, or raw bytes to a file | |
 | `nand erase-block <block> [count]` | UpdServer | Erase blocks | yes |
 | `nand write-block <block> <file>` | UpdServer | Write one block from a file | yes |
-| `mem peek <addr> [len]` / `mem hvpeek <addr> [len]` | UpdServer | Read physical or hypervisor memory (default length 16) | |
-| `mem poke <addr> <value>` / `mem hvpoke <addr> <value>` | UpdServer | Write a 32-bit or 64-bit value | yes |
+| `mem peek <addr> [len]` | UpdServer or XBDM | Read memory (default length 16); XBDM shows unreadable bytes as `??` | |
+| `mem poke <addr> <value>` | UpdServer or XBDM | Write a 32-bit value (XBDM: big-endian, as console memory is) | yes |
+| `mem hvpeek <addr> [len]` / `mem hvpoke <addr> <value>` | UpdServer | Read or write hypervisor memory | `hvpoke` |
 | `mem get1bl [-o file]` | UpdServer | Dump the 1BL ROM (default `1bl.bin`) | |
-| `file get <remote> <local>` / `file send <local> <remote>` | UpdServer | Download or upload a file | |
-| `file mount <mount-point> <device>` / `file unmount <mount-point>` / `file mkdir <path>` | UpdServer | Storage management | |
+| `file get <remote> <local>` / `file send <local> <remote>` | UpdServer or XBDM | Download or upload a file, with progress | |
+| `file mkdir <path>` | UpdServer or XBDM | Create a folder (XBDM: one level) | |
+| `file mount <mount-point> <device>` / `file unmount <mount-point>` | UpdServer | Storage management | |
 | `xell info` | XeLL | CPU key, DVD key, page colours | |
 | `xell flash-dump [-o file]` | XeLL | Download the NAND image (default `xell_flash.bin`) | |
 | `xell fuses` | XeLL | Fuse listing | |
 | `xell kv [-o file] [-r \| --raw-block]` | XeLL | Keyvault: decrypted, `--raw` (`/KVRAW`) or `--raw-block` (`/KVRAW2`) (default `kv.bin`) | |
+| `xbdm ls <folder>` / `xbdm stat <path>` | XBDM | List a folder; size, type and times of one path | |
+| `xbdm drives` | XBDM | Drives with total and free bytes | |
+| `xbdm rm [--dir] <path>` | XBDM | Delete a file, or an empty folder | yes |
+| `xbdm mv <from> <to>` | XBDM | Rename or move within one drive; the new name must not exist | |
+| `xbdm screenshot [-o file]` | XBDM | Save the raw, still tiled frame buffer (default `screenshot.raw`) and print its geometry | |
+| `xbdm launch <xex>` | XBDM | Start an executable (`magicboot title=`) | yes |
+| `xbdm reboot [--cold]` | XBDM | Warm or cold `magicboot` | yes |
+| `xbdm modules` / `xbdm regions` | XBDM | Loaded modules; committed memory regions (`walkmem`) | |
+| `xbdm eject` | XBDM | Open the disc tray | |
+| `xbdm raw '<line>'` | XBDM | Send one command line as typed and print the answer, for diagnostics (binary answers are not read) | yes |
 
 Destructive commands print a warning and require typing `yes` on an interactive terminal. Without a
 terminal they fail with a usage error unless `--yes` is given.
@@ -335,6 +417,12 @@ updclient nand read-block 0x10 2 -o blocks.bin --ip 192.168.1.5
 updclient xell info --ip 192.168.1.5
 updclient xell flash-dump --ip 192.168.1.5 --xell-port 8080 -o xell.bin
 updclient power reboot --ip 192.168.1.5 --yes
+updclient --target xbdm://192.168.1.50 info
+updclient --target xbdm://192.168.1.50 file get 'HDD:\Content\save.bin' save.bin
+updclient --target xbdm://192.168.1.50 file send game.xex /HDD/Games/Test/default.xex
+updclient --target xbdm://192.168.1.50 --yes xbdm launch /HDD/Games/Test/default.xex
+updclient --ip 192.168.1.50 xbdm ls /HDD --json
+updclient --target xbdm://192.168.1.50 --trace xbdm-trace.txt xbdm drives
 ```
 
 ### Exit codes
@@ -342,7 +430,7 @@ updclient power reboot --ip 192.168.1.5 --yes
 | Code | Meaning |
 | --- | --- |
 | 0 | Success (also `--help` and `--version`) |
-| 1 | Runtime or transport error, including a declined confirmation |
+| 1 | Runtime or transport error, including a declined confirmation, an XBDM refusal (4xx) and a cancelled transfer |
 | 2 | Usage error: bad arguments, `--target` with `--ip`, a destructive command without `--yes` and without a terminal, `xell` without a target, a scheme with no registered transport, or any library `InvalidArgument` error |
 | 3 | Discovery found nothing, or discovery is unavailable (for example the UDP port cannot be bound) |
 
@@ -359,10 +447,14 @@ command somehow produced one, is dropped):
   `dvd_key`, `bg_color`, `fg_color` (each `null` when not found) and `missing_fields`.
 - Failure: `{"error": {"code": "...", "message": "...", "os_error": 111}}`. `os_error` appears only
   when there is one. `code` is an `ErrorCode` name (`ConnectFailed`, `Timeout`, `Protocol`, ...) or
-  one of `Usage`, `DiscoveryFailed`, `NoDevices`, `Aborted`.
+  one of `Usage`, `DiscoveryFailed`, `NoDevices`, `Aborted`. When an XBDM console refused the command,
+  `"console_status": 402` (the 4xx code) appears instead of `os_error`, and the message ends with the
+  console's line.
 - Commands the console does not acknowledge (`power *`, `nand erase-block`, `nand write-block`,
   `mem poke`, `mem hvpoke`, `file send`, `file mount`, `file unmount`, `file mkdir`) include
-  `"acknowledged": false`. It means "sent", not "done"; verify with a follow-up read.
+  `"acknowledged": false`. It means "sent", not "done"; verify with a follow-up read. XBDM answers
+  every command, so over XBDM these report `"acknowledged": true`, except a reboot or shutdown the
+  console answered by closing the connection.
 - `discover` prints `{"devices": [...]}`. When the list is empty it still prints it, and exits 3.
 
 The exit code is the same with and without `--json`.
@@ -382,6 +474,10 @@ sudo sysctl net.ipv4.ip_unprivileged_port_start=0
 The port must also be free (the socket is opened with address reuse) and not blocked by a firewall.
 The console must be on the same broadcast domain. Passing `--target` or `--ip` skips discovery
 entirely and needs no privileges.
+
+XBDM discovery needs no privileges: it broadcasts a name query to UDP port 730 from an ephemeral port
+and collects the replies, then asks each console its name over TCP. Many networks drop the broadcast;
+name the console with `--target xbdm://<address>` then.
 
 ## Project layout
 
