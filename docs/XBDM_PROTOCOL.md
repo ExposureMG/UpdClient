@@ -606,7 +606,10 @@ returns the connection to the idle state. Cancelling a download closes the conne
 (it is reopened for the next command) and discards the partial local file, which the
 app's sinks already do on a failed transfer. A `length` larger than the size `dirlist`
 reported, or larger than the sink allows, is refused by closing the connection before
-reading the body (5.2).
+reading the body (5.2). When no listing gave the size, the client asks `getfileattributes`
+first (3.4) and refuses a file of 4 GiB or more before sending `getfile`: the mock, as the
+worst case, announces such a size modulo 2^32, and the download would end early looking
+complete. A console that refuses `getfileattributes` is asked for the file without that bound.
 
 ### 3.6 Upload (`sendfile`)
 
@@ -640,7 +643,10 @@ reading the body (5.2).
 to the final name after `200`. If the final name exists the client deletes it right
 before the rename (the app's Replace confirmation has already been given). A cancel or
 a drop closes the connection; on the next connection the client deletes the temporary
-file, best effort. The client never sends more or fewer bytes than announced.
+file, best effort. That includes a connection that fails after the `sendfile` line was sent
+but before its 204 was read, because the console may already have created the file (the mock
+creates it before answering; question 32). The client never sends more or fewer bytes than
+announced.
 
 ### 3.7 `sendvfile`
 
@@ -1141,6 +1147,22 @@ Each needs a real console (or an emulator that implements XBDM) to settle.
     target (ON's devkit `bye` problem)? Does it depend on the console?
 30. Does a type-1 lookup match names case-insensitively?
 31. Is the `getfile` length really little-endian?
+
+Added when the client first ran against the mock (docs/HARDWARE_TEST_PLAN.md, N1 to N8):
+
+32. Does the console create the `sendfile` target before it answers 204, so that a drop
+    right after the 204 leaves an empty file?
+33. Does every target implement `getfileattributes`? The client's `downloadToFile` sends it
+    before every `getfile`.
+34. Is `magicboot title=... directory="DRIVE:\"` accepted for a file in a drive root, or is
+    `title` alone needed there, as DevTool sends for `FLASH:`?
+35. Are the formats the client sends accepted everywhere: lower-case `0x` hex without padding,
+    `setmem` data as upper-case hex without quotes?
+36. Is `bye` always answered `200- bye` before the close?
+37. Is a connection over the limit refused instead of the greeting, or after it?
+38. Does a reboot drop every connection, or only the one that asked for it?
+39. Screenshot: the field order and separators of the geometry line, and how `framebuffersize`
+    relates to `pitch * height`.
 
 ## 7. Known defects in the references (do not copy)
 
