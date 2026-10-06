@@ -18,6 +18,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace updclient::xbdm {
@@ -25,6 +26,14 @@ namespace updclient::xbdm {
 namespace detail {
 struct Session;
 } // namespace detail
+
+// What a trace hook is told, on the thread doing the I/O: every command line sent
+// and every text line received (greeting, status lines, body lines, the screenshot
+// geometry), as text without CR LF; and for binary data in either direction (file
+// contents, memory blocks, frame buffers) only how many bytes moved, never the
+// bytes themselves.
+enum class TraceEvent { Sent, Received, BinarySent, BinaryReceived };
+using TraceHook = std::function<void(TraceEvent event, std::string_view text, uint64_t bytes)>;
 
 // Apart from commandTimeout, every timeout is idle-based: the longest wait for the
 // next byte (or for room to send one), restarted whenever data moves. Zero
@@ -53,6 +62,9 @@ struct ClientOptions {
   uint64_t maxUploadBytes = kMaxUploadBytes;
   // Largest getfile length accepted from the console.
   uint64_t maxDownloadBytes = 0xFFFFFFFFull;
+
+  // Protocol trace, for diagnosing a console; empty for none.
+  TraceHook trace;
 };
 
 // For an Error this client raised because the console answered 4xx: the status

@@ -16,6 +16,10 @@
 #include <updclient/protocols/updserver/client.hpp>
 #include <updclient/protocols/updserver/discovery.hpp>
 #include <updclient/protocols/updserver/protocol.hpp>
+#include <updclient/protocols/xbdm/client.hpp>
+#include <updclient/protocols/xbdm/discovery.hpp>
+#include <updclient/protocols/xbdm/path.hpp>
+#include <updclient/protocols/xbdm/protocol.hpp>
 #include <updclient/protocols/xell/client.hpp>
 #include <updclient/protocols/xell/discovery.hpp>
 
@@ -23,7 +27,8 @@ namespace updclient {
 
 // Registers the "tcp" transport and the built-in discovery providers with the
 // process-wide registries. Safe to call repeatedly and from several threads;
-// only the first call has an effect.
+// only the first call has an effect. XBDM is not among them: call
+// xbdm::registerXbdmScheme() or xbdm::registerXbdm() as well.
 UPDCLIENT_API void registerBuiltins();
 
 } // namespace updclient

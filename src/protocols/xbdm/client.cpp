@@ -260,9 +260,18 @@ struct Session {
     return {};
   }
 
+  void trace(TraceEvent event, std::string_view text, uint64_t bytes = 0) const {
+    if (!options.trace) return;
+    try {
+      options.trace(event, text, bytes);
+    } catch (...) {
+    }
+  }
+
   Result<void> sendLine(std::string_view line, std::string_view context) {
     std::string wire(line);
     wire += "\r\n";
+    trace(TraceEvent::Sent, line);
     return sendBytes(bytesOf(wire), options.idleTimeout, context);
   }
 
@@ -294,6 +303,7 @@ struct Session {
         std::string line(begin, newline);
         bufferPos = static_cast<size_t>(newline - buffer.begin()) + 1;
         if (!line.empty() && line.back() == '\r') line.pop_back();
+        trace(TraceEvent::Received, line);
         if (line.size() > options.maxLineBytes) {
           return dropWith(ErrorCode::LimitExceeded,
                           "the console sent a line of " + std::to_string(line.size()) + " bytes, limit is " +
@@ -399,12 +409,14 @@ struct Session {
       const size_t n = std::min(out.size(), buffered());
       std::copy_n(buffer.begin() + static_cast<std::ptrdiff_t>(bufferPos), n, out.begin());
       bufferPos += n;
+      trace(TraceEvent::BinaryReceived, {}, n);
       return n;
     }
     if (auto r = arm(idle, context); !r) return unexpected<Error>(r.error());
     auto n = transport->readSome(out);
     if (!n) return transportFailure(n.error(), idle, context);
     if (*n == 0) return dropWith(ErrorCode::Disconnected, "the console closed the connection during binary data", context);
+    trace(TraceEvent::BinaryReceived, {}, *n);
     return *n;
   }
 
@@ -439,6 +451,7 @@ struct Session {
   void sayBye() noexcept {
     if (!connected() || transferActive || buffered() != 0) return;
     deadline.reset();
+    trace(TraceEvent::Sent, "bye");
     if (!sendBytes(bytesOf("bye\r\n"), options.byeTimeout, "bye")) return;
     (void)readLine(options.byeTimeout, "bye");
   }
@@ -789,6 +802,7 @@ Result<void> FileWriter::write(std::span<const uint8_t> data) {
                               s.context() + ": the connection is closed"));
   }
   if (auto r = s.session->sendBytes(data, s.session->options.idleTimeout, s.context()); !r) return s.failed(r.error());
+  s.session->trace(TraceEvent::BinarySent, {}, data.size());
   s.written += data.size();
   return {};
 }

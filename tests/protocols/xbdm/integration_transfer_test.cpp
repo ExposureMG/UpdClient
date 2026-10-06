@@ -531,3 +531,48 @@ XBDM_LINK_TEST(XbdmTransferIntegration, AwkwardNames) {
   CHECK(partFiles(rig.mock, "HDD:\\Content").empty());
   CHECK(client.isConnected());
 }
+
+XBDM_LINK_TEST(XbdmTransferIntegration, TraceSeesEveryLineButNoFileData) {
+  Rig rig(link);
+  ut::TempDir dir;
+  const std::string marker = "SECRET-FILE-CONTENTS-";
+  Bytes secret;
+  for (int i = 0; i < 2000; ++i) ut::append(secret, marker);
+  REQUIRE_OK(rig.mock.addFile("HDD:\\secret.bin", secret));
+  REQUIRE(ut::writeFile(dir.file("up"), secret));
+
+  struct Event {
+    updclient::xbdm::TraceEvent kind;
+    std::string text;
+    uint64_t bytes;
+  };
+  std::vector<Event> events;
+  auto options = quickOptions();
+  options.trace = [&](updclient::xbdm::TraceEvent kind, std::string_view text, uint64_t bytes) {
+    events.push_back({kind, std::string(text), bytes});
+  };
+  {
+    auto client = rig.client(options);
+    REQUIRE_OK(client.downloadToFile("HDD:\\secret.bin", dir.file("down")));
+    REQUIRE_OK(client.uploadFromFile(dir.file("up"), "HDD:\\copy.bin"));
+    REQUIRE_OK(client.list("HDD:\\"));
+  }
+  using updclient::xbdm::TraceEvent;
+  std::vector<std::string> sent;
+  uint64_t binaryIn = 0, binaryOut = 0;
+  for (const auto &e : events) {
+    CHECK_MSG(e.text.find(marker) == std::string::npos, "file data in the trace: " + e.text.substr(0, 40));
+    if (e.kind == TraceEvent::Sent) sent.push_back(e.text);
+    if (e.kind == TraceEvent::BinaryReceived) binaryIn += e.bytes;
+    if (e.kind == TraceEvent::BinarySent) binaryOut += e.bytes;
+  }
+  CHECK_EQ(sent, rig.mock.commandLines());
+  CHECK_EQ(binaryIn, uint64_t{4} + secret.size());
+  CHECK_EQ(binaryOut, uint64_t{secret.size()});
+  REQUIRE(!events.empty());
+  CHECK(events.front().kind == TraceEvent::Received);
+  CHECK_EQ(events.front().text, std::string("201- connected"));
+  CHECK(std::any_of(events.begin(), events.end(),
+                    [](const Event &e) { return e.text == "202- multiline response follows"; }));
+  CHECK(std::any_of(events.begin(), events.end(), [](const Event &e) { return e.text.rfind("name=\"Content\"", 0) == 0; }));
+}
