@@ -1,0 +1,526 @@
+#include "protocols/xbdm/client_fake.hpp"
+#include "support/loopback_server.hpp"
+#include "support/test_harness.hpp"
+#include "support/test_util.hpp"
+
+#include <updclient/protocols/xbdm/client.hpp>
+#include <updclient/protocols/xbdm/protocol.hpp>
+
+#include <cstdint>
+#include <filesystem>
+#include <map>
+#include <string>
+#include <vector>
+
+using namespace updclient;
+using namespace updclient::xbdm;
+using xt::FakeConsole;
+
+namespace {
+
+XbdmClient connected(const std::shared_ptr<FakeConsole> &console, ClientOptions options = xt::quickOptions(),
+                     XbdmClient::Connector connector = {}) {
+  auto client = xt::attach(console, options, std::move(connector));
+  if (!client) throw std::runtime_error("attach failed: " + formatError(client.error()));
+  return std::move(*client);
+}
+
+ut::Bytes le32(uint32_t v) {
+  return {static_cast<uint8_t>(v), static_cast<uint8_t>(v >> 8), static_cast<uint8_t>(v >> 16),
+          static_cast<uint8_t>(v >> 24)};
+}
+
+std::string quotedArg(const std::string &line, const std::string &key) {
+  const std::string marker = key + "=\"";
+  const size_t start = line.find(marker);
+  if (start == std::string::npos) return {};
+  const size_t end = line.find('"', start + marker.size());
+  return line.substr(start + marker.size(), end - start - marker.size());
+}
+
+// A tiny console file system: enough of sendfile, getfileattributes, delete and
+// rename to follow an upload through.
+struct Files {
+  std::map<std::string, ut::Bytes> files;
+  std::vector<std::string> folders;
+  int afterDataStatus = 200;
+  int renameStatus = 200;
+  int sendfileStatus = 204;
+
+  void install(FakeConsole &console) {
+    console.handle([this](FakeConsole &c, const std::string &line) { serve(c, line); });
+  }
+
+  void serve(FakeConsole &c, const std::string &line) {
+    const std::string name = quotedArg(line, "name");
+    if (line.rfind("sendfile ", 0) == 0) {
+      const size_t at = line.find("length=");
+      const uint64_t length = parseNumber64(line.substr(at + 7)).value_or(0);
+      if (sendfileStatus != 204) {
+        c.line(std::to_string(sendfileStatus) + "- refused");
+        return;
+      }
+      c.line("204- send binary data");
+      c.expectBinary(length, [this, name](FakeConsole &console, const ut::Bytes &data) {
+        if (afterDataStatus == 200) files[name] = data;
+        console.line(std::to_string(afterDataStatus) + "- after data");
+      });
+    } else if (line.rfind("getfileattributes ", 0) == 0) {
+      if (std::find(folders.begin(), folders.end(), name) != folders.end()) {
+        c.line("200- sizehi=0x0 sizelo=0x0 directory");
+      } else if (files.count(name)) {
+        c.line("200- sizehi=0x0 sizelo=" + formatNumber(files[name].size()));
+      } else {
+        c.line("402- file not found");
+      }
+    } else if (line.rfind("delete ", 0) == 0) {
+      if (files.erase(name)) c.line("200- OK");
+      else c.line("402- file not found");
+    } else if (line.rfind("rename ", 0) == 0) {
+      if (renameStatus != 200) {
+        c.line(std::to_string(renameStatus) + "- no");
+        return;
+      }
+      const std::string to = quotedArg(line, "newname");
+      auto it = files.find(name);
+      if (it == files.end()) {
+        c.line("402- file not found");
+        return;
+      }
+      files[to] = it->second;
+      files.erase(name);
+      c.line("200- OK");
+    } else if (line.rfind("getfile ", 0) == 0) {
+      auto it = files.find(name);
+      if (it == files.end()) {
+        c.line("402- file not found");
+        return;
+      }
+      c.line("203- binary response follows");
+      c.send(le32(static_cast<uint32_t>(it->second.size())));
+      c.send(it->second);
+    } else {
+      c.line("407- unknown command");
+    }
+  }
+
+  std::vector<std::string> names() const {
+    std::vector<std::string> out;
+    for (const auto &[name, data] : files) out.push_back(name);
+    return out;
+  }
+};
+
+bool isTemporaryFor(const std::string &temp, const std::string &folder, const std::string &name) {
+  if (temp.rfind(folder + "\\", 0) != 0) return false;
+  const std::string leaf = temp.substr(folder.size() + 1);
+  return leaf.size() <= kMaxFileNameBytes && leaf.size() > 14 && leaf.substr(leaf.size() - 5) == ".part" &&
+         name.rfind(leaf.substr(0, leaf.size() - 14), 0) == 0;
+}
+
+} // namespace
+
+TEST(XbdmTransfer, DownloadStreamsAndGivesTheConnectionBack) {
+  const ut::Bytes file = ut::patternBytes(100000, 11);
+  Files fs;
+  fs.files["HDD:\\data.bin"] = file;
+  auto console = FakeConsole::create();
+  fs.install(*console);
+  auto client = connected(console);
+  auto reader = client.openRead("HDD:\\data.bin", file.size());
+  REQUIRE_OK(reader);
+  CHECK_EQ(reader->size(), uint64_t{100000});
+  CHECK(reader->isOpen());
+  ut::Bytes got;
+  std::vector<uint8_t> buffer(4093);
+  for (;;) {
+    auto n = reader->read(buffer);
+    REQUIRE_OK(n);
+    if (*n == 0) break;
+    got.insert(got.end(), buffer.begin(), buffer.begin() + static_cast<std::ptrdiff_t>(*n));
+    CHECK_EQ(reader->position(), uint64_t{got.size()});
+  }
+  CHECK_EQ(got, file);
+  CHECK(!reader->isOpen());
+  CHECK_EQ(reader->read(buffer).value_or(1), size_t{0});
+  CHECK(!client.transferActive());
+  CHECK(client.isConnected());
+  CHECK_EQ(console->commands(), std::vector<std::string>{"getfile name=\"HDD:\\data.bin\""});
+}
+
+TEST(XbdmTransfer, EmptyAndRefusedDownloads) {
+  Files fs;
+  fs.files["HDD:\\empty"] = {};
+  auto console = FakeConsole::create();
+  fs.install(*console);
+  auto client = connected(console);
+  auto empty = client.openRead("HDD:\\empty");
+  REQUIRE_OK(empty);
+  CHECK_EQ(empty->size(), uint64_t{0});
+  CHECK(!empty->isOpen());
+  std::vector<uint8_t> buffer(8);
+  CHECK_EQ(empty->read(buffer).value_or(1), size_t{0});
+  CHECK(!client.transferActive());
+
+  auto missing = client.openRead("HDD:\\missing");
+  REQUIRE_ERR(missing, ErrorCode::Io);
+  CHECK_EQ(consoleStatusCode(missing.error()).value_or(0), 402);
+  CHECK(client.isConnected());
+
+  CHECK_ERR(client.openRead("HDD:\\big", uint64_t{1} << 32), ErrorCode::Unsupported);
+  CHECK_ERR(client.openRead("HDD:\\"), ErrorCode::InvalidArgument);
+  CHECK_EQ(console->commands().size(), size_t{2});
+}
+
+TEST(XbdmTransfer, ClosingADownloadEarlyDropsTheConnectionAndReconnectRestoresIt) {
+  Files fs;
+  fs.files["HDD:\\f"] = ut::patternBytes(1000, 2);
+  auto first = FakeConsole::create();
+  fs.install(*first);
+  auto second = FakeConsole::create();
+  second->on("dbgname", "200- back\r\n");
+  auto queue = std::make_shared<xt::ConsoleQueue>(xt::ConsoleQueue{second});
+  auto client = connected(first, xt::quickOptions(), xt::connectorFor(queue));
+
+  auto reader = client.openRead("HDD:\\f");
+  REQUIRE_OK(reader);
+  std::vector<uint8_t> buffer(10);
+  REQUIRE_OK(reader->read(buffer));
+  reader->close();
+  CHECK(!reader->isOpen());
+  CHECK_ERR(reader->read(buffer), ErrorCode::NotConnected);
+  CHECK(!client.isConnected());
+  CHECK(!client.transferActive());
+  CHECK(first->closed());
+  CHECK_EQ(first->byes(), 0);
+  CHECK_ERR(client.debugName(), ErrorCode::NotConnected);
+
+  REQUIRE_OK(client.reconnect());
+  CHECK_EQ(client.debugName().value_or(""), std::string("back"));
+  CHECK_ERR(client.reconnect(), ErrorCode::ConnectFailed);
+}
+
+TEST(XbdmTransfer, DownloadToFileIsAtomic) {
+  ut::TempDir dir;
+  REQUIRE(dir.ok());
+  const ut::Bytes file = ut::patternBytes(70000, 12);
+  Files fs;
+  fs.files["HDD:\\f.bin"] = file;
+  auto console = FakeConsole::create();
+  fs.install(*console);
+  auto client = connected(console);
+  std::vector<std::pair<uint64_t, uint64_t>> progress;
+  REQUIRE_OK(client.downloadToFile("HDD:\\f.bin", dir.file("out.bin"),
+                                   [&](uint64_t done, uint64_t total) { progress.emplace_back(done, total); }));
+  CHECK_EQ(ut::readFile(dir.file("out.bin")).value_or(ut::Bytes{}), file);
+  CHECK_EQ(dir.entries(), std::vector<std::string>{"out.bin"});
+  REQUIRE(!progress.empty());
+  CHECK_EQ(progress.back().first, uint64_t{70000});
+  CHECK_EQ(progress.back().second, uint64_t{70000});
+
+  auto dropping = FakeConsole::create();
+  dropping->handle([](FakeConsole &c, const std::string &) {
+    c.line("203- binary response follows");
+    c.send(le32(5000));
+    c.send(ut::Bytes(1000, 1));
+    c.hangUp();
+  });
+  auto other = connected(dropping);
+  CHECK_ERR(other.downloadToFile("HDD:\\f.bin", dir.file("partial.bin")), ErrorCode::Disconnected);
+  CHECK_EQ(dir.entries(), std::vector<std::string>{"out.bin"});
+}
+
+TEST(XbdmTransfer, UploadGoesToATemporaryNameAndIsRenamedAfterTheConsoleConfirmed) {
+  const ut::Bytes data = ut::patternBytes(150000, 13);
+  Files fs;
+  auto console = FakeConsole::create();
+  fs.install(*console);
+  auto client = connected(console);
+  auto writer = client.openWrite("HDD:\\Games\\a rather long file name for FATX.bin", data.size());
+  REQUIRE_OK(writer);
+  const std::string temp = writer->temporaryPath();
+  CHECK(isTemporaryFor(temp, "HDD:\\Games", "a rather long file name for FATX.bin"));
+  CHECK_EQ(writer->path(), std::string("HDD:\\Games\\a rather long file name for FATX.bin"));
+  CHECK_EQ(console->lastCommand(), "sendfile name=\"" + temp + "\" length=0x249f0");
+  CHECK(client.transferActive());
+  CHECK_ERR(client.debugName(), ErrorCode::InvalidArgument);
+
+  CHECK_ERR(writer->finish(), ErrorCode::InvalidArgument);
+  CHECK(writer->isOpen());
+  for (size_t offset = 0; offset < data.size(); offset += 30000) {
+    REQUIRE_OK(writer->write(std::span<const uint8_t>(data).subspan(offset, 30000)));
+  }
+  CHECK_ERR(writer->write(ut::Bytes{1}), ErrorCode::InvalidArgument);
+  CHECK_EQ(writer->written(), uint64_t{data.size()});
+  REQUIRE_OK(writer->finish());
+  CHECK(!writer->isOpen());
+  CHECK(!client.transferActive());
+  CHECK_EQ(fs.names(), std::vector<std::string>{"HDD:\\Games\\a rather long file name for FATX.bin"});
+  CHECK_EQ(fs.files.begin()->second, data);
+  const std::vector<std::string> expected = {
+      "sendfile name=\"" + temp + "\" length=0x249f0",
+      "getfileattributes name=\"HDD:\\Games\\a rather long file name for FATX.bin\"",
+      "rename name=\"" + temp + "\" newname=\"HDD:\\Games\\a rather long file name for FATX.bin\"",
+  };
+  CHECK_EQ(console->commands(), expected);
+  CHECK(client.pendingCleanup().empty());
+  CHECK_EQ(console->problems(), std::string());
+}
+
+TEST(XbdmTransfer, UploadReplacesAnExistingFile) {
+  Files fs;
+  fs.files["HDD:\\x.txt"] = ut::bytesOf("old");
+  auto console = FakeConsole::create();
+  fs.install(*console);
+  auto client = connected(console);
+  auto writer = client.openWrite("HDD:\\x.txt", 3);
+  REQUIRE_OK(writer);
+  REQUIRE_OK(writer->write(ut::bytesOf("new")));
+  REQUIRE_OK(writer->finish());
+  CHECK_EQ(fs.names(), std::vector<std::string>{"HDD:\\x.txt"});
+  CHECK_EQ(fs.files["HDD:\\x.txt"], ut::bytesOf("new"));
+  REQUIRE_EQ(console->commands().size(), size_t{4});
+  CHECK_EQ(console->commands()[2], std::string("delete name=\"HDD:\\x.txt\""));
+}
+
+TEST(XbdmTransfer, UploadOntoAFolderFailsAndRemovesTheTemporaryFile) {
+  Files fs;
+  fs.folders.push_back("HDD:\\dir");
+  auto console = FakeConsole::create();
+  fs.install(*console);
+  auto client = connected(console);
+  auto writer = client.openWrite("HDD:\\dir", 2);
+  REQUIRE_OK(writer);
+  REQUIRE_OK(writer->write(ut::Bytes{1, 2}));
+  CHECK_ERR(writer->finish(), ErrorCode::InvalidArgument);
+  CHECK(fs.files.empty());
+  CHECK_EQ(console->lastCommand(), "delete name=\"" + writer->temporaryPath() + "\"");
+  CHECK(client.isConnected());
+  CHECK(client.pendingCleanup().empty());
+}
+
+TEST(XbdmTransfer, RefusalsBeforeAndAfterTheData) {
+  {
+    Files fs;
+    fs.sendfileStatus = 413;
+    auto console = FakeConsole::create();
+    fs.install(*console);
+    auto client = connected(console);
+    auto writer = client.openWrite("HDD:\\nofolder\\x", 4);
+    REQUIRE_ERR(writer, ErrorCode::Io);
+    CHECK_EQ(consoleStatusCode(writer.error()).value_or(0), 413);
+    CHECK(client.isConnected());
+    CHECK(!client.transferActive());
+  }
+  {
+    Files fs;
+    fs.afterDataStatus = 415;
+    auto console = FakeConsole::create();
+    fs.install(*console);
+    auto client = connected(console);
+    auto writer = client.openWrite("HDD:\\full.bin", 4);
+    REQUIRE_OK(writer);
+    REQUIRE_OK(writer->write(ut::Bytes{1, 2, 3, 4}));
+    auto done = writer->finish();
+    REQUIRE_ERR(done, ErrorCode::Io);
+    CHECK_EQ(consoleStatusCode(done.error()).value_or(0), 415);
+    CHECK_EQ(console->lastCommand(), "delete name=\"" + writer->temporaryPath() + "\"");
+    CHECK(client.isConnected());
+    CHECK(fs.files.empty());
+    for (const auto &command : console->commands()) CHECK(command.find("HDD:\\full.bin\"") == std::string::npos);
+  }
+  {
+    Files fs;
+    fs.renameStatus = 414;
+    auto console = FakeConsole::create();
+    fs.install(*console);
+    auto client = connected(console);
+    auto writer = client.openWrite("HDD:\\r.bin", 1);
+    REQUIRE_OK(writer);
+    REQUIRE_OK(writer->write(ut::Bytes{9}));
+    auto done = writer->finish();
+    REQUIRE(!done);
+    CHECK_EQ(consoleStatusCode(done.error()).value_or(0), 414);
+    CHECK(fs.files.empty());
+    CHECK_EQ(console->lastCommand(), "delete name=\"" + writer->temporaryPath() + "\"");
+  }
+}
+
+TEST(XbdmTransfer, DropMidUploadLeavesNothingUnderTheFinalNameAndReconnectCleansUp) {
+  Files fs;
+  auto first = FakeConsole::create();
+  fs.install(*first);
+  first->dropAfterWritten(60 + 5000);
+  auto second = FakeConsole::create();
+  std::vector<std::string> deleted;
+  second->handle([&](FakeConsole &c, const std::string &line) {
+    deleted.push_back(line);
+    c.line("200- OK");
+  });
+  auto queue = std::make_shared<xt::ConsoleQueue>(xt::ConsoleQueue{second});
+  auto client = connected(first, xt::quickOptions(), xt::connectorFor(queue));
+
+  const ut::Bytes data = ut::patternBytes(20000, 14);
+  auto writer = client.openWrite("HDD:\\keep.bin", data.size());
+  REQUIRE_OK(writer);
+  const std::string temp = writer->temporaryPath();
+  Result<void> sent;
+  for (size_t offset = 0; offset < data.size() && sent; offset += 4096) {
+    sent = writer->write(std::span<const uint8_t>(data).subspan(offset, std::min<size_t>(4096, data.size() - offset)));
+  }
+  REQUIRE_ERR(sent, ErrorCode::Disconnected);
+  CHECK(!writer->isOpen());
+  CHECK(!client.isConnected());
+  CHECK(!client.transferActive());
+  CHECK_EQ(client.pendingCleanup(), std::vector<std::string>{temp});
+  CHECK(fs.files.empty());
+  for (const auto &command : first->commands()) CHECK(command.find("keep.bin\"") == std::string::npos);
+  CHECK_ERR(writer->finish(), ErrorCode::NotConnected);
+
+  REQUIRE_OK(client.reconnect());
+  CHECK_EQ(deleted, std::vector<std::string>{"delete name=\"" + temp + "\""});
+  CHECK(client.pendingCleanup().empty());
+  CHECK(client.isConnected());
+}
+
+TEST(XbdmTransfer, AbortAndDestructionCloseTheConnection) {
+  Files fs;
+  auto console = FakeConsole::create();
+  fs.install(*console);
+  auto client = connected(console);
+  {
+    auto writer = client.openWrite("HDD:\\a.bin", 10);
+    REQUIRE_OK(writer);
+    REQUIRE_OK(writer->write(ut::Bytes{1, 2, 3}));
+  }
+  CHECK(!client.isConnected());
+  CHECK_EQ(client.pendingCleanup().size(), size_t{1});
+  CHECK(fs.files.empty());
+
+  Files other;
+  auto second = FakeConsole::create();
+  other.install(*second);
+  auto client2 = connected(second);
+  auto writer = client2.openWrite("HDD:\\b.bin", 10);
+  REQUIRE_OK(writer);
+  writer->abort();
+  writer->abort();
+  CHECK(!writer->isOpen());
+  CHECK(!client2.isConnected());
+  CHECK_ERR(writer->write(ut::Bytes{1}), ErrorCode::NotConnected);
+  CHECK_EQ(client2.pendingCleanup(), std::vector<std::string>{writer->temporaryPath()});
+  CHECK_ERR(client2.reconnect(), ErrorCode::Unsupported);
+}
+
+TEST(XbdmTransfer, UploadSizesAndLimits) {
+  Files fs;
+  auto console = FakeConsole::create();
+  fs.install(*console);
+  auto client = connected(console);
+  const uint64_t fiveGiB = uint64_t{5} << 30;
+  CHECK_ERR(client.openWrite("HDD:\\huge.bin", fiveGiB), ErrorCode::LimitExceeded);
+  CHECK(console->commands().empty());
+
+  ClientOptions wide = xt::quickOptions();
+  wide.maxUploadBytes = UINT64_MAX;
+  client.setOptions(wide);
+  auto writer = client.openWrite("HDD:\\huge.bin", fiveGiB);
+  REQUIRE_OK(writer);
+  CHECK_EQ(writer->size(), fiveGiB);
+  CHECK(console->lastCommand().find(" length=0x140000000") != std::string::npos);
+  writer->abort();
+
+  CHECK_ERR(client.openWrite("HDD:\\", 1), ErrorCode::InvalidArgument);
+}
+
+TEST(XbdmTransfer, ZeroLengthUploads) {
+  Files fs;
+  auto console = FakeConsole::create();
+  fs.install(*console);
+  auto client = connected(console);
+  auto writer = client.openWrite("HDD:\\zero", 0);
+  REQUIRE_OK(writer);
+  REQUIRE_OK(writer->finish());
+  CHECK_EQ(fs.names(), std::vector<std::string>{"HDD:\\zero"});
+
+  auto direct = FakeConsole::create();
+  direct->handle([](FakeConsole &c, const std::string &line) {
+    if (line.rfind("sendfile", 0) == 0) c.line("200- OK");
+    else if (line.rfind("getfileattributes", 0) == 0) c.line("402- no");
+    else c.line("200- OK");
+  });
+  auto other = connected(direct);
+  auto confirmed = other.openWrite("HDD:\\zero", 0);
+  REQUIRE_OK(confirmed);
+  REQUIRE_OK(confirmed->finish());
+  CHECK_EQ(direct->commands().size(), size_t{3});
+
+  auto strict = FakeConsole::create();
+  strict->handle([](FakeConsole &c, const std::string &) { c.line("200- OK"); });
+  auto third = connected(strict);
+  CHECK_ERR(third.openWrite("HDD:\\one", 1), ErrorCode::Protocol);
+}
+
+TEST(XbdmTransfer, UploadFromFile) {
+  ut::TempDir dir;
+  REQUIRE(dir.ok());
+  const ut::Bytes data = ut::patternBytes(90000, 15);
+  REQUIRE(ut::writeFile(dir.file("in.bin"), data));
+  Files fs;
+  auto console = FakeConsole::create();
+  fs.install(*console);
+  auto client = connected(console);
+  uint64_t last = 0;
+  REQUIRE_OK(client.uploadFromFile(dir.file("in.bin"), "HDD:\\in.bin", [&](uint64_t done, uint64_t) { last = done; }));
+  CHECK_EQ(fs.files["HDD:\\in.bin"], data);
+  CHECK_EQ(last, uint64_t{90000});
+  CHECK_ERR(client.uploadFromFile(dir.file("missing"), "HDD:\\x", nullptr), ErrorCode::InvalidArgument);
+  CHECK_ERR(client.uploadFromFile(dir.path(), "HDD:\\x", nullptr), ErrorCode::InvalidArgument);
+
+  ut::TempDir out;
+  REQUIRE_OK(client.downloadToFile("HDD:\\in.bin", out.file("back.bin")));
+  CHECK_EQ(ut::readFile(out.file("back.bin")).value_or(ut::Bytes{}), data);
+}
+
+TEST(XbdmTransfer, ASecondClientServesAnotherTransfer) {
+  Files fs;
+  fs.files["HDD:\\one"] = ut::patternBytes(64, 1);
+  fs.files["HDD:\\two"] = ut::patternBytes(64, 2);
+  auto a = FakeConsole::create();
+  auto b = FakeConsole::create();
+  fs.install(*a);
+  fs.install(*b);
+  auto first = connected(a);
+  auto second = connected(b);
+  auto r1 = first.openRead("HDD:\\one");
+  auto r2 = second.openRead("HDD:\\two");
+  REQUIRE_OK(r1);
+  REQUIRE_OK(r2);
+  std::vector<uint8_t> buffer(64);
+  CHECK_EQ(r1->read(buffer).value_or(0), size_t{64});
+  CHECK_EQ(buffer, fs.files["HDD:\\one"]);
+  CHECK_EQ(r2->read(buffer).value_or(0), size_t{64});
+  CHECK_EQ(buffer, fs.files["HDD:\\two"]);
+}
+
+TEST(XbdmTransfer, ConnectOverLoopbackTcp) {
+  std::string why;
+  auto server = ut::LoopbackServer::start(
+      [](ut::ServerConnection &connection, const std::atomic<bool> &) {
+        connection.sendAll(ut::bytesOf("201- connected\r\n"));
+        ut::Bytes command;
+        if (!connection.recvExact(command, 9) || ut::textOf(command) != "dbgname\r\n") return;
+        connection.sendAll(ut::bytesOf("200- Loopback Kit\r\n"));
+        if (!connection.recvExact(command, 5) || ut::textOf(command) != "bye\r\n") return;
+        connection.sendAll(ut::bytesOf("200- bye\r\n"));
+      },
+      &why);
+  if (!server) SKIP("loopback sockets are not available here: " + why);
+  auto endpoint = net::Endpoint::parse("xbdm://127.0.0.1:" + std::to_string(server->port()));
+  REQUIRE_OK(endpoint);
+  auto client = XbdmClient::connect(*endpoint, xt::quickOptions());
+  REQUIRE_OK(client);
+  CHECK_EQ(client->debugName().value_or(""), std::string("Loopback Kit"));
+  client->close();
+  CHECK(!client->isConnected());
+}
