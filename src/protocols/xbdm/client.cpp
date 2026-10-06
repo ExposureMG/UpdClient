@@ -1395,7 +1395,13 @@ Result<void> XbdmClient::downloadToFile(const std::string &path, const std::file
                                         Progress progress) {
   HostFile out;
   if (auto r = out.open(hostPath); !r) return r;
-  auto reader = openRead(path);
+  std::optional<uint64_t> expectedSize;
+  if (auto known = attributes(path)) {
+    expectedSize = known->size;
+  } else if (!isRefusal(known.error())) {
+    return unexpected<Error>(known.error());
+  }
+  auto reader = openRead(path, expectedSize);
   if (!reader) return unexpected<Error>(reader.error());
   std::vector<uint8_t> chunk(static_cast<size_t>(std::min<uint64_t>(kTransferChunkBytes, std::max<uint64_t>(reader->size(), 1))));
   if (progress) progress(0, reader->size());

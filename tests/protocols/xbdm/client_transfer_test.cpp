@@ -219,7 +219,11 @@ TEST(XbdmTransfer, DownloadToFileIsAtomic) {
   CHECK_EQ(progress.back().second, uint64_t{70000});
 
   auto dropping = FakeConsole::create();
-  dropping->handle([](FakeConsole &c, const std::string &) {
+  dropping->handle([](FakeConsole &c, const std::string &line) {
+    if (line.rfind("getfileattributes ", 0) == 0) {
+      c.line("200- sizehi=0x0 sizelo=0x1388");
+      return;
+    }
     c.line("203- binary response follows");
     c.send(le32(5000));
     c.send(ut::Bytes(1000, 1));
@@ -228,6 +232,34 @@ TEST(XbdmTransfer, DownloadToFileIsAtomic) {
   auto other = connected(dropping);
   CHECK_ERR(other.downloadToFile("HDD:\\f.bin", dir.file("partial.bin")), ErrorCode::Disconnected);
   CHECK_EQ(dir.entries(), std::vector<std::string>{"out.bin"});
+}
+
+TEST(XbdmTransfer, DownloadToFileIsBoundedByTheFileSize) {
+  ut::TempDir dir;
+  REQUIRE(dir.ok());
+  // A console that announces a 5 GiB file's size modulo 4 GiB would hand over a
+  // cut file that looks complete.
+  auto huge = FakeConsole::create();
+  huge->on("getfileattributes name=\"HDD:\\huge.bin\"", "200- sizehi=0x1 sizelo=0x40000000\r\n");
+  auto client = connected(huge);
+  CHECK_ERR(client.downloadToFile("HDD:\\huge.bin", dir.file("huge.bin")), ErrorCode::Unsupported);
+  CHECK(dir.entries().empty());
+  CHECK_EQ(huge->problems(), std::string());
+
+  auto longer = FakeConsole::create();
+  longer->on("getfileattributes name=\"HDD:\\f.bin\"", "200- sizehi=0x0 sizelo=0x10\r\n");
+  longer->on("getfile name=\"HDD:\\f.bin\"", "203- binary response follows\r\n" + ut::textOf(le32(0x20)));
+  auto other = connected(longer);
+  CHECK_ERR(other.downloadToFile("HDD:\\f.bin", dir.file("f.bin")), ErrorCode::LimitExceeded);
+  CHECK(dir.entries().empty());
+
+  auto old = FakeConsole::create();
+  old->on("getfileattributes name=\"HDD:\\f.bin\"", "407- unknown command\r\n");
+  old->on("getfile name=\"HDD:\\f.bin\"", "203- binary response follows\r\n" + ut::textOf(le32(3)) + "abc");
+  auto third = connected(old);
+  REQUIRE_OK(third.downloadToFile("HDD:\\f.bin", dir.file("f.bin")));
+  CHECK_EQ(ut::readFile(dir.file("f.bin")).value_or(ut::Bytes{}), ut::bytesOf("abc"));
+  CHECK_EQ(old->problems(), std::string());
 }
 
 TEST(XbdmTransfer, UploadGoesToATemporaryNameAndIsRenamedAfterTheConsoleConfirmed) {

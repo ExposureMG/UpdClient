@@ -366,7 +366,10 @@ public:
   Result<FileReader> openRead(const std::string &path, std::optional<uint64_t> expectedSize = std::nullopt);
   Result<FileWriter> openWrite(const std::string &path, uint64_t size);
   // Writes "<hostPath>.part" and renames it to hostPath after the last byte; a
-  // failed download leaves nothing under hostPath.
+  // failed download leaves nothing under hostPath. The size from getfileattributes
+  // bounds the length getfile announces, so a file of 4 GiB or more is Unsupported
+  // instead of arriving cut at its size modulo 4 GiB. When the console refuses
+  // getfileattributes, the download goes ahead without that bound.
   Result<void> downloadToFile(const std::string &path, const std::filesystem::path &hostPath,
                               Progress progress = nullptr);
   Result<void> uploadFromFile(const std::filesystem::path &hostPath, const std::string &path,

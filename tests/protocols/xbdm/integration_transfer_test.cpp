@@ -215,8 +215,7 @@ XBDM_LINK_TEST(XbdmTransferIntegration, OneTransferOwnsTheConnection) {
 
 // Files of 4 GiB and more: getfile's length has 32 bits (section 3.5) and sendfile
 // beyond 4 GiB - 1 is unknown (section 3.6). The mock serves a virtual file.
-XBDM_LINK_XFAIL_TEST(XbdmTransferIntegration, AboveFourGiB,
-                     "downloadToFile does not know the size, so a 4 GiB file arrives truncated") {
+XBDM_LINK_TEST(XbdmTransferIntegration, AboveFourGiB) {
   Rig rig(link);
   ut::TempDir dir;
   const uint64_t huge = (4ull << 30) + 4096;
