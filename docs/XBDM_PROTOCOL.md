@@ -803,6 +803,9 @@ in the details:
   reports the first unreadable address (XL:90-91), ME zero-fills the rest (MEc:607-610).
 - A block larger than what remains: ME throws (MEc:617-619); XLs reads it and keeps only
   what was asked (XLs:87-93) **[≠]**.
+- The end: every reader stops as soon as `length` bytes have arrived, whether or not that
+  block has bit 15 set, and reads no further header (XL:88, XLs:99, MEc:626). A console
+  that sent an empty last block after the data would leave it for the next command.
 - Sizes used successfully: up to 0xC000 per request in ME (MEc:126-128, "3/4th of the
   receive buffer"), 0x10000 in ME's dumper (ME `Commands/DumpMemoryCommand.cs:204-205`),
   0x8000 while running and 0x20000 while stopped in XL (XL:238). The console's maximum is
