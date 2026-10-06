@@ -1,0 +1,95 @@
+#pragma once
+
+#include <updclient/core/error.hpp>
+#include <updclient/core/export.hpp>
+#include <updclient/discovery/discovery.hpp>
+#include <updclient/net/datagram.hpp>
+#include <updclient/net/endpoint.hpp>
+#include <updclient/net/transport.hpp>
+#include <updclient/net/transport_registry.hpp>
+#include <updclient/protocols/xbdm/client.hpp>
+#include <updclient/protocols/xbdm/protocol.hpp>
+
+#include <chrono>
+#include <cstdint>
+#include <functional>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace updclient::xbdm {
+
+struct DiscoveryOptions {
+  std::string broadcastAddress = "255.255.255.255";
+  uint16_t port = kXbdmPort;
+  // Datagrams sent per search, spread evenly over its timeout: the first and the
+  // retries.
+  int sends = 3;
+  // Ask every console that answered for its dbgname over TCP; that name replaces
+  // the UDP one (section 2.2). A console that does not answer keeps its UDP name.
+  bool queryNames = true;
+  ClientOptions nameQuery = [] {
+    ClientOptions o;
+    o.greetingTimeout = std::chrono::milliseconds(2000);
+    o.idleTimeout = std::chrono::milliseconds(2000);
+    o.commandTimeout = std::chrono::milliseconds(4000);
+    o.byeTimeout = std::chrono::milliseconds(500);
+    return o;
+  }();
+};
+
+// Finds consoles with the XBDM name protocol on UDP port 730 (section 2): a
+// type-3 wildcard broadcast that every console answers with its name. Devices are
+// reported with protocol "xbdm", the reply's source address, and info "name",
+// "udpName" (the name in the reply) and "port". Replies are de-duplicated by
+// address. Whether every console answers UDP is not known, and networks often
+// block broadcasts: identify() is the way in by address alone.
+//
+// One datagram socket, bound to an ephemeral port on the IPv4 wildcard address,
+// sends the broadcast; the system picks the interface. The socket factory and the
+// connector used for the dbgname query are injectable.
+class UPDCLIENT_API XbdmDiscovery final : public discovery::IDiscoveryProvider {
+public:
+  using Connector = std::function<Result<net::TransportPtr>(const net::Endpoint &)>;
+
+  // An empty factory selects the real UDP socket; an empty connector connects
+  // over TCP.
+  explicit XbdmDiscovery(net::DatagramSocketFactory socketFactory = {}, DiscoveryOptions options = {},
+                         Connector connector = {});
+
+  std::string name() const override;
+  // Collects replies until the timeout, or until the first with stopAfterFirst.
+  Result<std::vector<discovery::DiscoveredDevice>> discover(std::chrono::milliseconds timeout,
+                                                            bool stopAfterFirst) override;
+  // Type 1: the console of that name, compared case-insensitively.
+  Result<std::optional<discovery::DiscoveredDevice>> findByName(std::string_view consoleName,
+                                                                std::chrono::milliseconds timeout);
+  // Type 3 sent to one address: is a console there?
+  Result<std::optional<discovery::DiscoveredDevice>> probeAddress(std::string_view address,
+                                                                  std::chrono::milliseconds timeout);
+
+private:
+  struct Search;
+  Result<std::vector<discovery::DiscoveredDevice>> run(const Search &search, std::chrono::milliseconds timeout);
+  void resolveNames(std::vector<discovery::DiscoveredDevice> &devices);
+
+  net::DatagramSocketFactory socketFactory_;
+  DiscoveryOptions options_;
+  Connector connector_;
+};
+
+// Connect by address only, for networks where UDP is blocked or a console does
+// not answer it: connects, reads the greeting and asks dbgname. The device has
+// the endpoint's host as address and info "name" and "port".
+UPDCLIENT_API Result<discovery::DiscoveredDevice> identify(const net::Endpoint &endpoint, ClientOptions options = {});
+
+// Adds an XbdmDiscovery provider. Not part of registerBuiltins().
+UPDCLIENT_API void registerXbdmDiscovery(
+    discovery::DiscoveryRegistry &registry = discovery::DiscoveryRegistry::instance());
+
+// registerXbdmScheme and registerXbdmDiscovery together.
+UPDCLIENT_API void registerXbdm(net::TransportRegistry &transports = net::TransportRegistry::instance(),
+                                discovery::DiscoveryRegistry &providers = discovery::DiscoveryRegistry::instance());
+
+} // namespace updclient::xbdm
