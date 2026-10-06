@@ -134,8 +134,11 @@ struct DirListing {
 // Whether the console said so before going away. Both count as success.
 enum class PowerResult { Acknowledged, ConnectionClosed };
 
+// The references disagree on what a warm magicboot does (section 3.14): the
+// dashboard for ClementDreptin's XBDM and OpenNeighborhood, a title restart for
+// EmDbg and MemoryEngine360.
 enum class RebootMode {
-  Warm, // magicboot: the dashboard in XeDK and OpenNeighborhood, a title restart in others (section 3.14)
+  Warm, // magicboot
   Cold  // magicboot cold
 };
 
@@ -289,9 +292,10 @@ class UPDCLIENT_API XbdmClient {
 public:
   using Connector = std::function<Result<net::TransportPtr>()>;
 
-  // xbdm://host[:port] (port 730 by default), a bare host, or any registered
-  // scheme. A missing port becomes 730 for tcp and xbdm. Endpoint::timeout bounds
-  // the TCP connect.
+  // xbdm://host[:port] connects over TCP directly, port 730 by default. Any other
+  // scheme, a bare host (tcp) included, goes through the TransportRegistry, so
+  // registerBuiltins() must have registered tcp; a missing port becomes 730 there
+  // too. Endpoint::timeout bounds the TCP connect.
   static Result<XbdmClient> connect(const net::Endpoint &endpoint, ClientOptions options = {});
   // Opens a connection through the connector and reads the greeting. reconnect()
   // uses the same connector.
@@ -305,7 +309,7 @@ public:
   XbdmClient &operator=(XbdmClient &&) noexcept;
   XbdmClient(const XbdmClient &) = delete;
   XbdmClient &operator=(const XbdmClient &) = delete;
-  // close()
+  // As close(), unless a transfer is open: it keeps the connection until it ends.
   ~XbdmClient();
 
   bool isConnected() const noexcept;
