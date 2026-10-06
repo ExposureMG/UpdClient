@@ -1,6 +1,7 @@
 #include "cli/commands.hpp"
 #include "cli/session.hpp"
 #include "cli/version.hpp"
+#include "cli/xbdm.hpp"
 
 #include <format>
 
@@ -9,6 +10,7 @@ namespace updclient::cli {
 namespace {
 
 Outcome<void> runInfo(Context &context) {
+  if (context.targetsXbdm()) return xbdmInfo(context);
   return withUpdServer(context, "", [&context](updserver::UpdServerClient &client, const net::Endpoint &) -> Outcome<void> {
     auto result = client.getInfo();
     if (!result) return fromError(result.error());
@@ -56,7 +58,8 @@ Outcome<void> runVersion(Context &context) {
 } // namespace
 
 void registerInfoCommands(CLI::App &app, Context &context) {
-  auto *info = app.add_subcommand("info", "Fetch console hardware info, CPU key, DVD key and NAND geometry (UpdServer)");
+  auto *info = app.add_subcommand("info", "Fetch console hardware info, CPU key, DVD key and NAND geometry (UpdServer), "
+                                          "or the debug name, type, id and running title (XBDM)");
   info->callback([&context] { context.finish(runInfo(context)); });
 
   auto *version = app.add_subcommand("version", "Get the UpdServer version running on the console");

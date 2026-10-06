@@ -20,7 +20,7 @@ public:
   // printed for empty text); JSON mode prints data.
   void result(const nlohmann::json &data, std::string_view text);
   // JSON mode only; the human readable message is logged to stderr by the caller.
-  void error(std::string_view code, std::string_view message, int sysError = 0);
+  void error(std::string_view code, std::string_view message, int sysError = 0, int consoleStatus = 0);
 
 private:
   void writeDocument(const nlohmann::json &document);

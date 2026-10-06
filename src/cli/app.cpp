@@ -18,8 +18,9 @@ namespace {
 
 constexpr const char *kFooter =
     "Targets: --target takes a URI such as tcp://192.168.1.5:49 or a bare IP; --ip and --port are\n"
-    "shortcuts for tcp targets. UpdServer commands auto-discover a console when no target is given;\n"
-    "xell commands never do.\n"
+    "shortcuts for tcp targets. With --target xbdm://192.168.1.5 (port 730) the file, mem, power and\n"
+    "info commands speak XBDM, the Xbox debug monitor, instead of UpdServer. UpdServer and xbdm\n"
+    "commands auto-discover a console when no target is given; xell commands never do.\n"
     "Numbers: decimal (4096) or 0x-prefixed hex (0x1000).\n"
     "Output: results go to stdout, logs to stderr; --json prints exactly one JSON document.\n"
     "Exit codes: 0 ok, 1 runtime or transport error, 2 usage error, 3 discovery found nothing or is unavailable.";
@@ -44,6 +45,9 @@ void addGlobalOptions(CLI::App &app, Context &context) {
   app.add_flag("-j,--json", options.json, "Print results and errors as one JSON document on stdout");
   app.add_flag("-v,--verbose", options.verbose, "Log debug detail to stderr");
   app.add_flag("--yes", options.yes, "Skip the confirmation required by destructive commands");
+  app.add_option("--trace", options.trace,
+                 "Append every XBDM command line and every line received to this file (file data is never "
+                 "written, only its size)");
 }
 
 // The deepest subcommand that was parsed, so help can describe the command the
@@ -101,9 +105,10 @@ int handleParseError(CLI::App &app, Context &context, const CLI::ParseError &err
 int run(int argc, char **argv) {
   initLogging();
   registerBuiltins();
+  xbdm::registerXbdmScheme();
 
   Context context;
-  CLI::App app{std::string("UpdClient - client for the Xbox 360 UpdServer and XeLL network services"),
+  CLI::App app{std::string("UpdClient - client for the Xbox 360 UpdServer, XeLL and XBDM network services"),
                "updclient"};
   app.set_version_flag("--version", std::string("updclient ") + kVersion);
   app.require_subcommand(1);
@@ -119,6 +124,7 @@ int run(int argc, char **argv) {
   registerMemCommands(app, context);
   registerFileCommands(app, context);
   registerXellCommands(app, context);
+  registerXbdmCommands(app, context);
   app.footer(kFooter);
 
   try {

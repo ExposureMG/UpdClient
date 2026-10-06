@@ -21,6 +21,8 @@ struct Failure {
   std::string message;
   int sysError = 0;
   int exitCode = kExitRuntime;
+  // The 4xx status of an XBDM refusal; sysError is 0 then.
+  int consoleStatus = 0;
 };
 
 template <class T> using Outcome = expected<T, Failure>;
@@ -32,6 +34,7 @@ unexpected<Failure> fromError(const Error &error);
 
 struct GlobalOptions {
   std::string target;
+  std::string trace;
   std::string ip;
   std::optional<uint16_t> port;
   std::optional<uint16_t> xellPort;
@@ -41,6 +44,9 @@ struct GlobalOptions {
   bool verbose = false;
   bool yes = false;
 };
+
+// Which kind of console a command talks to; it decides the default port.
+enum class Service { UpdServer, Xell, Xbdm };
 
 // State shared by every command: global options, stdout rendering and the exit code.
 class Context {
@@ -55,12 +61,18 @@ public:
   // The endpoint named by --target or --ip, with --port / --xell-port and
   // --timeout-ms applied. Empty when neither was given.
   bool hasExplicitTarget() const noexcept { return !options.target.empty() || !options.ip.empty(); }
-  Outcome<net::Endpoint> explicitEndpoint(bool forXell) const;
+  Outcome<net::Endpoint> explicitEndpoint(Service service) const;
+  // --target names an xbdm:// endpoint: the file, mem, power and info commands
+  // then speak XBDM instead of UpdServer.
+  bool targetsXbdm() const;
 
   // Explicit target, or the first UpdServer console found by discovery.
   Outcome<net::Endpoint> resolveUpdServerEndpoint() const;
   // XeLL is never auto-discovered: --target or --ip is required.
   Outcome<net::Endpoint> resolveXellEndpoint() const;
+  // Explicit target (a bare host means xbdm://), or the first console that answers
+  // XBDM discovery.
+  Outcome<net::Endpoint> resolveXbdmEndpoint() const;
 
   // Fails right away when a destructive command could not be confirmed at all.
   Outcome<void> requireConfirmationPossible() const;

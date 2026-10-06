@@ -14,6 +14,12 @@ if(WIN32)
     target_link_libraries(updclient_tests PRIVATE ws2_32)
 endif()
 
+# The CLI tests run the updclient executable against the XBDM mock server.
+if(TARGET updclient AND NOT CMAKE_CROSSCOMPILING)
+    target_compile_definitions(updclient_tests PRIVATE UPDCLIENT_CLI_PATH="$<TARGET_FILE:updclient>")
+    add_dependencies(updclient_tests updclient)
+endif()
+
 if(COMMAND updclient_apply_warnings)
     updclient_apply_warnings(updclient_tests)
 endif()
