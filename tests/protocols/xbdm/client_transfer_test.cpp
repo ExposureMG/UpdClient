@@ -272,6 +272,7 @@ TEST(XbdmTransfer, UploadReplacesAnExistingFile) {
   fs.files["HDD:\\x.txt"] = ut::bytesOf("old");
   auto console = FakeConsole::create();
   fs.install(*console);
+  console->setMaxRead(1);
   auto client = connected(console);
   auto writer = client.openWrite("HDD:\\x.txt", 3);
   REQUIRE_OK(writer);
@@ -281,6 +282,7 @@ TEST(XbdmTransfer, UploadReplacesAnExistingFile) {
   CHECK_EQ(fs.files["HDD:\\x.txt"], ut::bytesOf("new"));
   REQUIRE_EQ(console->commands().size(), size_t{4});
   CHECK_EQ(console->commands()[2], std::string("delete name=\"HDD:\\x.txt\""));
+  CHECK_EQ(console->problems(), std::string());
 }
 
 TEST(XbdmTransfer, UploadOntoAFolderFailsAndRemovesTheTemporaryFile) {

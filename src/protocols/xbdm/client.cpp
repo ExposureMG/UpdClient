@@ -276,22 +276,20 @@ struct Session {
       bufferPos = 0;
     }
     if (auto r = arm(idle, context); !r) return unexpected<Error>(r.error());
-    const size_t offset = buffer.size();
-    buffer.resize(offset + kReadChunkBytes);
-    auto n = transport->readSome(std::span<uint8_t>(buffer.data() + offset, kReadChunkBytes));
-    if (!n) {
-      buffer.resize(offset);
-      return transportFailure(n.error(), idle, context);
-    }
-    buffer.resize(offset + *n);
+    uint8_t chunk[kReadChunkBytes];
+    auto n = transport->readSome(chunk);
+    if (!n) return transportFailure(n.error(), idle, context);
+    buffer.insert(buffer.end(), chunk, chunk + *n);
     return *n;
   }
 
   Result<std::string> readLine(milliseconds idle, std::string_view context) {
     cleanEof = false;
+    // Bytes after bufferPos already searched; fill() keeps them in front.
+    size_t scanned = 0;
     for (;;) {
       const auto begin = buffer.begin() + static_cast<std::ptrdiff_t>(bufferPos);
-      const auto newline = std::find(begin, buffer.end(), uint8_t{'\n'});
+      const auto newline = std::find(begin + static_cast<std::ptrdiff_t>(scanned), buffer.end(), uint8_t{'\n'});
       if (newline != buffer.end()) {
         std::string line(begin, newline);
         bufferPos = static_cast<size_t>(newline - buffer.begin()) + 1;
@@ -311,6 +309,7 @@ struct Session {
                         context);
       }
       const size_t pending = buffered();
+      scanned = pending;
       auto n = fill(idle, context);
       if (!n) {
         cleanEof = pending == 0 && n.error().code == ErrorCode::Disconnected;

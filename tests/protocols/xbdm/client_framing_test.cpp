@@ -360,3 +360,15 @@ TEST(XbdmFraming, ReaderOutlivesItsClient) {
   CHECK_EQ(console->byes(), 1);
   CHECK(console->closed());
 }
+
+TEST(XbdmFraming, ALongLineArrivingByteByByteIsReadInLinearTime) {
+  auto console = FakeConsole::create();
+  console->setMaxRead(1);
+  console->on("dbgname", "200- " + std::string(60000, 'n') + "\r\n");
+  auto client = connected(console);
+  const auto start = std::chrono::steady_clock::now();
+  auto name = client.debugName();
+  REQUIRE_OK(name);
+  CHECK_EQ(name->size(), size_t{60000});
+  CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+}
