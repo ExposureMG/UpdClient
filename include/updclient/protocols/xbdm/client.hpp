@@ -319,7 +319,8 @@ public:
   void setOptions(const ClientOptions &options);
   // The status line of the last answer, if there was one.
   std::optional<StatusLine> lastStatus() const;
-  // Temporary upload names left behind by aborted uploads, deleted by reconnect().
+  // Temporary upload names left behind by aborted uploads, and by a sendfile whose
+  // answer never arrived, deleted by reconnect().
   std::vector<std::string> pendingCleanup() const;
 
   // Closes the current connection (if any), opens a new one through the connector

@@ -417,6 +417,37 @@ TEST(XbdmTransfer, DropMidUploadLeavesNothingUnderTheFinalNameAndReconnectCleans
   CHECK(client.isConnected());
 }
 
+TEST(XbdmTransfer, ALostSendfileAnswerQueuesTheTemporaryName) {
+  auto first = FakeConsole::create();
+  first->handle([](FakeConsole &c, const std::string &) {
+    c.send(std::string_view("204- send bin"));
+    c.hangUp();
+  });
+  auto second = FakeConsole::create();
+  std::vector<std::string> deleted;
+  second->handle([&](FakeConsole &c, const std::string &line) {
+    deleted.push_back(line);
+    c.line("402- file not found");
+  });
+  auto queue = std::make_shared<xt::ConsoleQueue>(xt::ConsoleQueue{second});
+  auto client = connected(first, xt::quickOptions(), xt::connectorFor(queue));
+  CHECK_ERR(client.openWrite("HDD:\\up.bin", 10), ErrorCode::Disconnected);
+  REQUIRE_EQ(client.pendingCleanup().size(), size_t{1});
+  const std::string temp = client.pendingCleanup().front();
+  CHECK(isTemporaryFor(temp, "HDD:", "up.bin"));
+  REQUIRE_EQ(first->commands().size(), size_t{1});
+  CHECK_EQ(first->commands()[0].find("sendfile name=\"" + temp + "\""), size_t{0});
+  REQUIRE_OK(client.reconnect());
+  CHECK_EQ(deleted, std::vector<std::string>{"delete name=\"" + temp + "\""});
+  CHECK(client.pendingCleanup().empty());
+
+  auto refusing = FakeConsole::create();
+  refusing->handle([](FakeConsole &c, const std::string &) { c.line("413- file cannot be created"); });
+  auto other = connected(refusing);
+  CHECK_ERR(other.openWrite("HDD:\\up.bin", 10), ErrorCode::Io);
+  CHECK(other.pendingCleanup().empty());
+}
+
 TEST(XbdmTransfer, AbortAndDestructionCloseTheConnection) {
   Files fs;
   auto console = FakeConsole::create();

@@ -1374,10 +1374,16 @@ Result<FileWriter> XbdmClient::openWrite(const std::string &path, uint64_t size)
 
   auto line = buildLine(Command("sendfile").text("name", *temp).number("length", size), session);
   if (!line) return unexpected<Error>(line.error());
+  if (auto r = session.checkUsable(context, false); !r) return unexpected<Error>(r.error());
   // Whether a console answers a zero-length sendfile with 204 or 200 is not known.
   auto status = size == 0 ? session.request(*line, {status::kSendBinary, status::kOk}, context)
                           : session.request(*line, {status::kSendBinary}, context);
-  if (!status) return unexpected<Error>(status.error());
+  if (!status) {
+    // The command may have reached the console, which may have created the file
+    // before its answer was lost; a refusal means it did not.
+    if (!isRefusal(status.error())) session.pendingCleanup.push_back(*temp);
+    return unexpected<Error>(status.error());
+  }
   session.finishCommand();
 
   auto state = std::make_unique<FileWriter::State>();

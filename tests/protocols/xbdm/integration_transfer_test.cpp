@@ -442,8 +442,7 @@ XBDM_LINK_TEST(XbdmTransferIntegration, DropAtEveryUploadOffset) {
 
 // Drops inside the sendfile answers: in the 204 line, and after all the data but
 // before the status.
-XBDM_LINK_XFAIL_TEST(XbdmTransferIntegration, DropAroundTheUploadData,
-                     "a temporary file created before a dropped 204 is never deleted") {
+XBDM_LINK_TEST(XbdmTransferIntegration, DropAroundTheUploadData) {
   Rig rig(link);
   ut::TempDir dir;
   const auto local = dir.file("up.bin");
