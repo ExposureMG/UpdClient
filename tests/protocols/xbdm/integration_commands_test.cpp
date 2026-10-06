@@ -582,3 +582,39 @@ XBDM_LINK_TEST(XbdmIntegration, EveryRefusalCodeKeepsTheConnection) {
   CHECK_EQ(client.lastStatus()->code, 497);
   CHECK_OK(client.debugName());
 }
+
+XBDM_LINK_TEST(XbdmIntegration, RawCommands) {
+  Rig rig(link);
+  auto client = rig.client();
+  auto name = client.rawCommand("dbgname");
+  REQUIRE_OK(name);
+  CHECK_EQ(name->status.code, 200);
+  CHECK_EQ(name->status.text, std::string("MockDevkit"));
+  CHECK(name->body.empty());
+
+  auto listing = client.rawCommand("dirlist name=\"HDD:\"");
+  REQUIRE_OK(listing);
+  CHECK_EQ(listing->status.code, 202);
+  CHECK_EQ(listing->body.size(), size_t{6});
+  auto unknown = client.rawCommand("whomadethis");
+  REQUIRE_OK(unknown);
+  CHECK_EQ(unknown->status.code, 407);
+  CHECK(client.isConnected());
+
+  rig.mock.clearCommands();
+  CHECK_ERR(client.rawCommand(""), ErrorCode::InvalidArgument);
+  CHECK_ERR(client.rawCommand("dbgname\r\nbye"), ErrorCode::InvalidArgument);
+  CHECK_ERR(client.rawCommand("dirlist name=\"HDD:\\\xe9\""), ErrorCode::InvalidArgument);
+  CHECK_ERR(client.rawCommand(std::string(1100, 'a')), ErrorCode::LimitExceeded);
+  CHECK(rig.mock.commands().empty());
+
+  auto binary = client.rawCommand("getfile name=\"HDD:\\default.xex\"");
+  CHECK_ERR(binary, ErrorCode::Unsupported);
+  CHECK(!client.isConnected());
+  CHECK_EQ(client.lastStatus()->code, 203);
+  REQUIRE_OK(client.reconnect());
+  auto bye = client.rawCommand("bye");
+  REQUIRE_OK(bye);
+  CHECK_EQ(bye->status.text, std::string("bye"));
+  CHECK_ERR(client.rawCommand("dbgname"), ErrorCode::Disconnected);
+}

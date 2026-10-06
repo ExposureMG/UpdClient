@@ -1753,6 +1753,44 @@ Result<std::vector<ModuleSection>> XbdmClient::moduleSections(const std::string 
   return sections;
 }
 
+Result<RawAnswer> XbdmClient::rawCommand(const std::string &line) {
+  auto s = sessionOf(session_);
+  if (!s) return unexpected<Error>(s.error());
+  auto &session = **s;
+  constexpr std::string_view context = "raw command";
+  if (line.empty() || line.find_first_not_of(' ') == std::string::npos) {
+    return fail(ErrorCode::InvalidArgument, "raw command: the line is empty");
+  }
+  for (char c : line) {
+    const auto u = static_cast<unsigned char>(c);
+    if (u < 0x20 || u > 0x7E) return fail(ErrorCode::InvalidArgument, "raw command: only printable ASCII is sent");
+  }
+  if (line.size() + 2 > session.options.maxCommandBytes) {
+    return fail(ErrorCode::LimitExceeded, "raw command: " + std::to_string(line.size() + 2) + " bytes exceed " +
+                                              std::to_string(session.options.maxCommandBytes));
+  }
+  if (auto r = session.checkUsable(context, false); !r) return unexpected<Error>(r.error());
+  session.startDeadline();
+  if (auto r = session.sendLine(line, context); !r) return unexpected<Error>(r.error());
+  auto status = session.readStatus(session.options.slowIdleTimeout, context);
+  if (!status) return unexpected<Error>(status.error());
+  RawAnswer answer{*status, {}};
+  if (status->code == status::kMultiline) {
+    auto body = session.readBodyLines(context);
+    if (!body) return unexpected<Error>(body.error());
+    answer.body = std::move(*body);
+    return answer;
+  }
+  if (status->isRefusal() || status->code == status::kOk || status->code == status::kConnected) {
+    session.finishCommand();
+    return answer;
+  }
+  return session.dropWith(ErrorCode::Unsupported,
+                          "answer '" + std::to_string(status->code) + "- " + detail::preview(status->text) +
+                              "' carries data a raw command cannot read; the connection was closed",
+                          context);
+}
+
 void registerXbdmScheme(net::TransportRegistry &registry) {
   net::SchemeTraits traits;
   traits.defaultPort = kXbdmPort;

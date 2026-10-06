@@ -203,6 +203,13 @@ struct ModuleSection {
   std::optional<uint32_t> flags;
 };
 
+// The answer to a command line sent as typed (XbdmClient::rawCommand).
+struct RawAnswer {
+  StatusLine status;
+  // The lines of a 202 answer, without the closing ".".
+  std::vector<std::string> body;
+};
+
 // (bytes done, bytes in total)
 using Progress = std::function<void(uint64_t, uint64_t)>;
 
@@ -411,6 +418,13 @@ public:
   Result<std::vector<MemoryRegion>> memoryRegions();
   Result<std::vector<Module>> modules();
   Result<std::vector<ModuleSection>> moduleSections(const std::string &module);
+
+  // For diagnostics and hardware tests: sends one line as it is (printable ASCII,
+  // not empty, CR LF added) and returns the status line, with the body of a 202.
+  // Here a 4xx is an answer, not an error. An answer with binary data or a
+  // dedicated connection (203, 204, 205) cannot be read this way: the connection
+  // is closed and the call fails with Unsupported.
+  Result<RawAnswer> rawCommand(const std::string &line);
 
 private:
   explicit XbdmClient(std::shared_ptr<detail::Session> session);

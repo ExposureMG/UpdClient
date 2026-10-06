@@ -223,6 +223,23 @@ Outcome<void> runRegions(Context &context) {
   });
 }
 
+Outcome<void> runRaw(Context &context, const std::string &line) {
+  return withXbdm(context, "send the raw command '" + line + "'",
+                  [&](xbdm::XbdmClient &client, const net::Endpoint &) -> Outcome<void> {
+                    auto answer = client.rawCommand(line);
+                    if (!answer) return fromError(answer.error());
+                    std::string text = std::format("{}- {}\n", answer->status.code, answer->status.text);
+                    for (const auto &l : answer->body) text += l + "\n";
+                    if (answer->status.code == xbdm::status::kMultiline) text += ".\n";
+                    context.output.result({{"command", line},
+                                           {"status", answer->status.code},
+                                           {"text", answer->status.text},
+                                           {"body", answer->body}},
+                                          text);
+                    return {};
+                  });
+}
+
 Outcome<void> runEject(Context &context) {
   return withXbdm(context, "", [&](xbdm::XbdmClient &client, const net::Endpoint &) -> Outcome<void> {
     auto r = client.ejectTray();
@@ -412,6 +429,11 @@ void registerXbdmCommands(CLI::App &app, Context &context) {
 
   auto *regions = group->add_subcommand("regions", "List the committed memory regions (walkmem)");
   regions->callback([&context] { context.finish(runRegions(context)); });
+
+  auto *raw = group->add_subcommand("raw", "Send one command line as typed and print the answer, for diagnostics; "
+                                            "binary answers are not read (needs --yes or confirmation)");
+  raw->add_option("line", *path, "The command line, e.g. 'dirlist name=\"HDD:\"'")->required();
+  raw->callback([&context, path] { context.finish(runRaw(context, *path)); });
 
   auto *eject = group->add_subcommand("eject", "Open the disc tray");
   eject->callback([&context] { context.finish(runEject(context)); });

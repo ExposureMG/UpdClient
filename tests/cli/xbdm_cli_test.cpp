@@ -214,6 +214,11 @@ TEST(XbdmCli, XbdmGroup) {
   CHECK_MSG(cli.run({"xbdm", "modules"}).out.find("xboxkrnl.exe") != std::string::npos, "modules");
   CHECK_MSG(cli.run({"xbdm", "regions"}).out.find("82000000") != std::string::npos, "regions");
   CHECK_EQ(cli.run({"xbdm", "eject"}).exit, 0);
+  CHECK_EQ(cli.run({"xbdm", "raw", "dbgname"}).exit, 2);
+  auto raw = cli.run({"--yes", "xbdm", "raw", "dirlist name=\"HDD:\\Attrs\""});
+  CHECK_MSG(raw.exit == 0 && contains(raw.out, "202- multiline response follows\nname=\"ro.txt\""), describe(raw));
+  auto rawJson = cli.run({"--yes", "--json", "xbdm", "raw", "systeminfo"});
+  CHECK_MSG(rawJson.exit == 0 && contains(rawJson.out, "\"status\": 407"), describe(rawJson));
 
   ut::TempDir dir;
   auto shot = cli.run({"xbdm", "screenshot", "-o", dir.file("shot.raw").string()});
