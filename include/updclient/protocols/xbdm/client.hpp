@@ -35,24 +35,31 @@ struct Session;
 enum class TraceEvent { Sent, Received, BinarySent, BinaryReceived };
 using TraceHook = std::function<void(TraceEvent event, std::string_view text, uint64_t bytes)>;
 
-// Apart from commandTimeout, every timeout is idle-based: the longest wait for the
-// next byte (or for room to send one), restarted whenever data moves. Zero
-// disables one, which lets a call wait forever; the defaults never do.
+// Every timeout is idle-based: the longest wait for the next byte (or for room to
+// send one), restarted whenever data moves. commandTimeout, and greetingTimeout
+// and byeTimeout for their one line, also bound the whole answer, so a console
+// that trickles bytes cannot stretch a call. Zero disables one, which lets a call
+// wait forever; the defaults never do.
 struct ClientOptions {
-  // For "201- connected" after the connection is made.
+  // For "201- connected" after the connection is made, as a whole.
   std::chrono::milliseconds greetingTimeout{5000};
   // Inside every answer, and between pieces of a file transfer.
   std::chrono::milliseconds idleTimeout{10000};
   // Answers the console is slow to give: screenshot, the status after sendfile
   // data, reboot, launch and shutdown.
   std::chrono::milliseconds slowIdleTimeout{30000};
-  // Upper bound for one whole command, from sending it to its last byte. The body
-  // of a file transfer is exempt: it may take as long as bytes keep moving.
+  // Upper bound for one whole command, from sending it to its last byte, and for
+  // the status after sendfile data. The body of a file transfer is exempt: it may
+  // take as long as bytes keep moving.
   std::chrono::milliseconds commandTimeout{60000};
-  // For the answer to "bye" when the client closes.
+  // For the answer to "bye" when the client closes, as a whole.
   std::chrono::milliseconds byeTimeout{2000};
 
+  // The greeting, the answer to bye and the status after sendfile data are short
+  // phrases and limited to 512 bytes (or maxLineBytes, if lower).
   size_t maxLineBytes = kMaxLineBytes;
+  // Every line of a 202 body counts as at least 64 bytes, about what an empty line
+  // costs once parsed.
   size_t maxBodyBytes = kMaxBodyBytes;
   size_t maxCommandBytes = kMaxCommandBytes;
   uint64_t maxScreenshotBytes = kMaxScreenshotBytes;
@@ -117,6 +124,8 @@ struct DriveSpace {
 
 struct FileAttributes {
   uint64_t size = 0;
+  // False when the console sent no sizehi and sizelo; size is then 0.
+  bool sizeKnown = false;
   // Raw FILETIMEs; empty when the console did not send them.
   std::optional<uint64_t> createdFileTime;
   std::optional<uint64_t> changedFileTime;
@@ -138,8 +147,10 @@ struct DirEntry : FileAttributes {
 
 struct DirListing {
   std::vector<DirEntry> entries;
-  // Lines that were not a usable entry (no name, a number that does not parse, a
-  // name with a path separator). "." and ".." are dropped without counting.
+  // Lines that were not a usable entry: no name, a number that does not parse, or
+  // a name validateName refuses (a path or drive separator, a wildcard, a control
+  // character or a byte above 0x7E), which no command could take back. "." and
+  // ".." are dropped without counting.
   size_t skipped = 0;
 };
 
@@ -248,13 +259,16 @@ private:
 // A sendfile in progress, to a temporary name in the target folder. write() sends
 // the bytes; finish() wants exactly size() of them, waits for the console's answer
 // and only then renames the temporary file to the final name (deleting a file of
-// that name first). A refusal after the data, or a failed rename, deletes the
-// temporary file on the same connection. abort() or a failure while data is
-// pending has to close the connection, because the console waits for the
-// announced length; the temporary name is then remembered and deleted, best
-// effort, by the client's next reconnect(). The final name is never touched before
-// the console confirmed the data. Destroying an unfinished writer aborts it.
-// Usable from one thread at a time, except cancel().
+// that name first). A refusal after the data, or a failed rename while no file of
+// the final name was deleted, deletes the temporary file on the same connection.
+// Once the old file was deleted, or its delete got no answer, the temporary file
+// may be the only copy of either version: a failed rename then keeps it, names it
+// in the error ("the upload is kept as ...") and never queues it for deletion.
+// abort() or a failure while data is pending has to close the connection, because
+// the console waits for the announced length; the temporary name is then
+// remembered and deleted, best effort, by the client's next reconnect(). The final
+// name is never touched before the console confirmed the data. Destroying an
+// unfinished writer aborts it. Usable from one thread at a time, except cancel().
 class UPDCLIENT_API FileWriter {
 public:
   FileWriter(FileWriter &&) noexcept;
@@ -350,7 +364,7 @@ public:
   // still open fails from then on.
   void close() noexcept;
   // Thread-safe. Closes the connection at once; the call in progress fails with
-  // Cancelled. Does not wait for it.
+  // Cancelled, a reconnect() that is still connecting included. Does not wait for it.
   void cancel() noexcept;
 
   // Console information (section 3.1).
@@ -365,11 +379,13 @@ public:
   Result<ConsoleInfo> consoleInfo();
 
   // Drives and files (sections 3.2 to 3.10).
+  // Names compared case-insensitively are listed once, at most 64 of them.
   Result<std::vector<std::string>> drives();
   // "HDD", "HDD:" or "HDD:\".
   Result<DriveSpace> driveSpace(const std::string &drive);
   Result<DirListing> list(const std::string &directory);
-  // Any 4xx means "does not exist or not accessible" (section 3.4).
+  // Any 4xx means "does not exist or not accessible" (section 3.4). getfileattributes
+  // only; sizeKnown tells whether the answer had a size.
   Result<FileAttributes> attributes(const std::string &path);
   // One level; the parent must exist. 410 when the name exists.
   Result<void> makeDirectory(const std::string &path);
@@ -385,11 +401,14 @@ public:
   // 4 GiB, so an expectedSize of 4 GiB or more is Unsupported.
   Result<FileReader> openRead(const std::string &path, std::optional<uint64_t> expectedSize = std::nullopt);
   Result<FileWriter> openWrite(const std::string &path, uint64_t size);
-  // Writes "<hostPath>.part" and renames it to hostPath after the last byte; a
-  // failed download leaves nothing under hostPath. The size from getfileattributes
-  // bounds the length getfile announces, so a file of 4 GiB or more is Unsupported
-  // instead of arriving cut at its size modulo 4 GiB. When the console refuses
-  // getfileattributes, the download goes ahead without that bound.
+  // Writes "<hostPath>.part" (or "<hostPath>.<random>.part" when that name is
+  // taken) and renames it to hostPath after the last byte; a failed download
+  // leaves nothing under hostPath. The size from getfileattributes bounds the
+  // length getfile announces, so a file of 4 GiB or more is Unsupported instead of
+  // arriving cut at its size modulo 4 GiB. When the console does not know
+  // getfileattributes (407) or answers without a size, the size comes from the
+  // parent folder's listing; when neither gives one, or the path is refused with
+  // another 4xx, the download goes ahead without that bound.
   Result<void> downloadToFile(const std::string &path, const std::filesystem::path &hostPath,
                               Progress progress = nullptr);
   Result<void> uploadFromFile(const std::filesystem::path &hostPath, const std::string &path,
@@ -408,7 +427,8 @@ public:
 
   // Raw memory, 32-bit addresses (section 3.16). length must be 1..maxMemoryReadBytes
   // and address + length must not pass 4 GiB.
-  // getmem: hex text, unreadable bytes are "??".
+  // getmem: hex text, unreadable bytes are "??". Sent as requests of at most 0x400
+  // bytes (kGetMemChunkBytes); a refusal of any of them fails the call.
   Result<MemoryRead> getMemory(uint32_t address, uint32_t length);
   // getmemex: binary blocks; the bytes after an early last block are unreadable.
   Result<MemoryRead> getMemoryEx(uint32_t address, uint32_t length);

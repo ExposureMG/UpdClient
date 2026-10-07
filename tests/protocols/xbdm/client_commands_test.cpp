@@ -218,6 +218,22 @@ TEST(XbdmClient, DrivesAndFreeSpace) {
   CHECK_EQ(console->problems(), std::string());
 }
 
+TEST(XbdmClient, DrivesAreDistinctAndAtMost64) {
+  auto console = FakeConsole::create();
+  std::string body = "202- multiline response follows\r\n";
+  for (int i = 0; i < 1000; ++i) body += "drivename=\"HDD\"\r\ndrivename=\"hdd\"\r\n";
+  for (int i = 0; i < 100; ++i) body += "drivename=\"D" + std::to_string(i) + "\"\r\n";
+  console->on("drivelist", body + ".\r\n");
+  auto client = connected(console);
+  auto drives = client.drives();
+  REQUIRE_OK(drives);
+  REQUIRE_EQ(drives->size(), size_t{64});
+  CHECK_EQ((*drives)[0], std::string("HDD"));
+  CHECK_EQ((*drives)[1], std::string("D0"));
+  CHECK_EQ((*drives)[63], std::string("D62"));
+  CHECK(client.isConnected());
+}
+
 TEST(XbdmClient, DirectoryListing) {
   auto console = FakeConsole::create();
   console->on("dirlist name=\"HDD:\\Content\\\"",
@@ -264,10 +280,29 @@ TEST(XbdmClient, DirectoryListing) {
   CHECK_EQ(big.changedFileTime.value_or(0), uint64_t{0x100000002});
 
   CHECK_EQ(listing->entries[3].size, uint64_t{0});
+  CHECK(!listing->entries[3].sizeKnown);
+  CHECK(xex.sizeKnown);
   CHECK(!listing->entries[3].created().has_value());
   CHECK_EQ(listing->entries[4].name, std::string("half"));
   CHECK(!listing->entries[4].createdFileTime.has_value());
   CHECK_EQ(console->problems(), std::string());
+}
+
+TEST(XbdmClient, ListingSkipsNamesNoCommandCouldUse) {
+  // Every name handed out can be joined to its folder and sent back.
+  auto console = FakeConsole::create();
+  std::string body = "202- multiline response follows\r\n";
+  for (const char *name : {":", "C:", "C:x", "x:", "*", "a?", "<>|", "a\x7f", "caf\xc3\xa9", "a/b"}) {
+    body += std::string("name=\"") + name + "\" sizehi=0x0 sizelo=0x1\r\n";
+  }
+  console->on("dirlist name=\"HDD:\\\"", body + "name=\"ok name.txt\" sizehi=0x0 sizelo=0x1\r\n.\r\n");
+  auto client = connected(console);
+  auto listing = client.list("HDD:\\");
+  REQUIRE_OK(listing);
+  REQUIRE_EQ(listing->entries.size(), size_t{1});
+  CHECK_EQ(listing->entries[0].name, std::string("ok name.txt"));
+  CHECK_EQ(listing->skipped, size_t{10});
+  for (const auto &entry : listing->entries) CHECK_OK(joinPath("HDD:\\", entry.name));
 }
 
 TEST(XbdmClient, ListingSendsExactlyOneTrailingBackslash) {
@@ -606,6 +641,32 @@ TEST(XbdmClient, GetMemTextWithUnreadableBytes) {
   CHECK(client.isConnected());
   CHECK_ERR(client.getMemory(0x82000000, 2), ErrorCode::Protocol);
   CHECK(!client.isConnected());
+}
+
+TEST(XbdmClient, GetMemTextAsksForAtMost0x400BytesAtATime) {
+  auto console = FakeConsole::create();
+  auto hexOf = [](size_t bytes, char digit) { return std::string(bytes * 2, digit); };
+  console->on("getmem addr=0x82000000 length=0x400", "202- multiline response follows\r\n" + hexOf(0x400, 'a') + "\r\n.\r\n")
+      .on("getmem addr=0x82000400 length=0x400",
+          "202- multiline response follows\r\n" + hexOf(0x200, 'b') + "\r\n" + hexOf(0x200, '?') + "\r\n.\r\n")
+      .on("getmem addr=0x82000800 length=0x101", "202- multiline response follows\r\n" + hexOf(0x101, 'c') + "\r\n.\r\n")
+      .on("getmem addr=0x0 length=0x400", "202- multiline response follows\r\n" + hexOf(0x400, '0') + "\r\n.\r\n")
+      .on("getmem addr=0x400 length=0x10", "404- memory not mapped\r\n");
+  auto client = connected(console);
+  auto read = client.getMemory(0x82000000, 0x901);
+  REQUIRE_OK(read);
+  REQUIRE_EQ(read->data.size(), size_t{0x901});
+  CHECK_EQ(read->data[0], uint8_t{0xaa});
+  CHECK_EQ(read->data[0x400], uint8_t{0xbb});
+  CHECK(!read->readable[0x600]);
+  CHECK_EQ(read->data[0x900], uint8_t{0xcc});
+  CHECK_EQ(read->readableBytes(), size_t{0x901 - 0x200});
+  // A refusal of a later piece fails the whole read.
+  auto refused = client.getMemory(0, 0x410);
+  REQUIRE(!refused);
+  expectStatus(refused.error(), 404);
+  CHECK(client.isConnected());
+  CHECK_EQ(console->problems(), std::string());
 }
 
 TEST(XbdmClient, GetMemTextRefusalAndJunk) {

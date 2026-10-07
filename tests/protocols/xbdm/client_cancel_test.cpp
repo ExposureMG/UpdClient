@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <thread>
@@ -269,6 +270,109 @@ TEST(XbdmCancel, CommandDeadlineBoundsATricklingAnswer) {
   CHECK_MSG(r.error().message.find("within 150 ms") != std::string::npos, r.error().message);
   CHECK(elapsed >= 140);
   CHECK(elapsed < 3000);
+}
+
+// Without a bound on the whole line, one byte just inside the idle timeout would
+// hold each of these for up to maxLineBytes idle timeouts.
+TEST(XbdmCancel, DeadlinesBoundATricklingGreeting) {
+  auto pipe = ut::MemoryPipe::create();
+  std::atomic<bool> stop{false};
+  std::thread console([&, server = pipe.server.get()] {
+    if (!server->writeAll(ut::bytesOf("201- "))) return;
+    while (!stop && server->writeAll(ut::bytesOf("x"))) std::this_thread::sleep_for(5ms);
+  });
+  ClientOptions options = patientOptions();
+  options.greetingTimeout = 150ms;
+  const auto start = Clock::now();
+  auto client = XbdmClient::attach(std::move(pipe.client), options);
+  const auto elapsed = msSince(start);
+  stop = true;
+  pipe.server->close();
+  console.join();
+  REQUIRE_ERR(client, ErrorCode::Timeout);
+  CHECK_MSG(client.error().message.find("greeting did not arrive within 150 ms") != std::string::npos,
+            client.error().message);
+  CHECK(elapsed >= 140);
+  CHECK(elapsed < 2000);
+}
+
+TEST(XbdmCancel, DeadlinesBoundATricklingAnswerToBye) {
+  auto pipe = ut::MemoryPipe::create();
+  PipeConsole console(std::move(pipe.server), [](PipeConsole &c) {
+    if (c.readLine() != "bye") return;
+    if (!c.send(std::string_view("200- "))) return;
+    while (!c.stop && c.send(std::string_view("x"))) std::this_thread::sleep_for(5ms);
+  });
+  ClientOptions options = patientOptions();
+  options.byeTimeout = 150ms;
+  auto client = XbdmClient::attach(std::move(pipe.client), options);
+  REQUIRE_OK(client);
+  const auto start = Clock::now();
+  client->close();
+  const auto elapsed = msSince(start);
+  CHECK(elapsed >= 140);
+  CHECK(elapsed < 2000);
+  CHECK(!client->isConnected());
+}
+
+TEST(XbdmCancel, DeadlinesBoundATricklingStatusAfterSendfileData) {
+  auto pipe = ut::MemoryPipe::create();
+  PipeConsole console(std::move(pipe.server), [](PipeConsole &c) {
+    if (!c.readLine()) return;
+    if (!c.send(std::string_view("204- send binary data\r\n")) || !c.readBytes(4)) return;
+    if (!c.send(std::string_view("200- "))) return;
+    while (!c.stop && c.send(std::string_view("x"))) std::this_thread::sleep_for(5ms);
+  });
+  ClientOptions options = patientOptions();
+  options.slowIdleTimeout = 1000ms;
+  options.commandTimeout = 150ms;
+  auto client = XbdmClient::attach(std::move(pipe.client), options);
+  REQUIRE_OK(client);
+  auto writer = client->openWrite("HDD:\\a.bin", 4);
+  REQUIRE_OK(writer);
+  REQUIRE_OK(writer->write(ut::Bytes{1, 2, 3, 4}));
+  const auto start = Clock::now();
+  auto r = writer->finish();
+  const auto elapsed = msSince(start);
+  REQUIRE_ERR(r, ErrorCode::Timeout);
+  CHECK_MSG(r.error().message.find("within 150 ms") != std::string::npos, r.error().message);
+  CHECK(elapsed >= 140);
+  CHECK(elapsed < 2000);
+}
+
+TEST(XbdmCancel, CancelDuringReconnectIsNotLost) {
+  std::vector<std::unique_ptr<PipeConsole>> consoles;
+  std::atomic<bool> connecting{false};
+  std::atomic<int> connects{0};
+  auto connector = [&]() -> Result<net::TransportPtr> {
+    auto pipe = ut::MemoryPipe::create();
+    consoles.push_back(std::make_unique<PipeConsole>(std::move(pipe.server), [](PipeConsole &c) {
+      while (auto line = c.readLine()) {
+        if (*line == "bye") return;
+        if (!c.send(std::string_view("200- name\r\n"))) return;
+      }
+    }));
+    if (connects++ == 1) {
+      connecting = true;
+      std::this_thread::sleep_for(300ms);
+    }
+    return net::TransportPtr(std::move(pipe.client));
+  };
+  auto client = XbdmClient::open(connector, patientOptions());
+  REQUIRE_OK(client);
+  std::thread canceller([&] {
+    while (!connecting) std::this_thread::yield();
+    std::this_thread::sleep_for(50ms);
+    client->cancel();
+  });
+  auto r = client->reconnect();
+  canceller.join();
+  CHECK_ERR(r, ErrorCode::Cancelled);
+  CHECK(!client->isConnected());
+  CHECK_ERR(client->debugName(), ErrorCode::Cancelled);
+  // A cancel before reconnect() began does not count against it.
+  REQUIRE_OK(client->reconnect());
+  CHECK_EQ(client->debugName().value_or(""), std::string("name"));
 }
 
 TEST(XbdmCancel, TransferBodiesAreExemptFromTheCommandDeadline) {

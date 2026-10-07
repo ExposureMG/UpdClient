@@ -28,6 +28,12 @@ using std::chrono::milliseconds;
 constexpr size_t kReadChunkBytes = 4096;
 constexpr uint64_t kAddressSpace = uint64_t{1} << 32;
 constexpr std::string_view kAnswered = "console answered ";
+// The greeting, the answer to bye and the status after sendfile data are short
+// fixed phrases.
+constexpr size_t kMaxShortLineBytes = 512;
+// What a body line counts against maxBodyBytes at least: an empty line costs
+// about this much memory once it is parsed and kept.
+constexpr size_t kMinBodyLineCharge = 64;
 
 std::span<const uint8_t> bytesOf(std::string_view text) {
   return {reinterpret_cast<const uint8_t *>(text.data()), text.size()};
@@ -147,6 +153,9 @@ struct Session {
   mutable std::mutex transportMutex;
   net::TransportPtr transport;
   std::atomic<bool> cancelled{false};
+  // Counts cancel() calls, so that a reconnect() can tell one that came while it
+  // was connecting.
+  std::atomic<uint64_t> cancelEpoch{0};
 
   std::vector<uint8_t> buffer;
   size_t bufferPos = 0;
@@ -154,6 +163,7 @@ struct Session {
 
   std::optional<Clock::time_point> deadline;
   milliseconds deadlineLength{0};
+  std::string_view deadlineWhat;
 
   bool transferActive = false;
   std::vector<std::string> pendingCleanup;
@@ -165,20 +175,31 @@ struct Session {
   void cancel() noexcept {
     std::lock_guard<std::mutex> lock(transportMutex);
     cancelled = true;
+    ++cancelEpoch;
     if (transport) transport->close();
   }
 
-  void install(net::TransportPtr next) {
-    net::TransportPtr old;
+  // False, with the new transport closed and the old one kept, when cancel() was
+  // called after `epoch` was read.
+  bool install(net::TransportPtr next, uint64_t epoch) {
+    net::TransportPtr unused;
+    bool installed = false;
     {
       std::lock_guard<std::mutex> lock(transportMutex);
-      old = std::move(transport);
-      transport = std::move(next);
-      cancelled = false;
+      if (cancelEpoch == epoch) {
+        unused = std::move(transport);
+        transport = std::move(next);
+        cancelled = false;
+        installed = true;
+      } else {
+        unused = std::move(next);
+      }
     }
+    if (unused) unused->close();
     buffer.clear();
     bufferPos = 0;
     deadline.reset();
+    return installed;
   }
 
   // Closes the connection after a failure that leaves the stream position unknown.
@@ -217,19 +238,23 @@ struct Session {
     return {};
   }
 
-  void startDeadline() {
-    if (options.commandTimeout.count() > 0) {
-      deadline = net::deadlineAfter(options.commandTimeout);
-      deadlineLength = options.commandTimeout;
+  // A bound on the whole of what follows, not only on each wait. Zero is none.
+  void startDeadline(milliseconds length, std::string_view what) {
+    if (length.count() > 0) {
+      deadline = net::deadlineAfter(length);
+      deadlineLength = length;
+      deadlineWhat = what;
     } else {
       deadline.reset();
     }
   }
 
+  void startDeadline() { startDeadline(options.commandTimeout, "the command did not complete"); }
+
   unexpected<Error> transportFailure(Error error, milliseconds idle, std::string_view context) {
     if (error.code == ErrorCode::Timeout) {
       if (deadline && Clock::now() >= *deadline) {
-        error.message = "the command did not complete within " + std::to_string(deadlineLength.count()) + " ms";
+        error.message = std::string(deadlineWhat) + " within " + std::to_string(deadlineLength.count()) + " ms";
       } else {
         error.message = "the console stopped responding (nothing for " + std::to_string(idle.count()) + " ms)";
       }
@@ -293,6 +318,11 @@ struct Session {
   }
 
   Result<std::string> readLine(milliseconds idle, std::string_view context) {
+    return readLine(idle, context, options.maxLineBytes);
+  }
+
+  Result<std::string> readLine(milliseconds idle, std::string_view context, size_t maxBytes) {
+    maxBytes = std::min(maxBytes, options.maxLineBytes);
     cleanEof = false;
     // Bytes after bufferPos already searched; fill() keeps them in front.
     size_t scanned = 0;
@@ -304,18 +334,17 @@ struct Session {
         bufferPos = static_cast<size_t>(newline - buffer.begin()) + 1;
         if (!line.empty() && line.back() == '\r') line.pop_back();
         trace(TraceEvent::Received, line);
-        if (line.size() > options.maxLineBytes) {
+        if (line.size() > maxBytes) {
           return dropWith(ErrorCode::LimitExceeded,
                           "the console sent a line of " + std::to_string(line.size()) + " bytes, limit is " +
-                              std::to_string(options.maxLineBytes),
+                              std::to_string(maxBytes),
                           context);
         }
         return line;
       }
-      if (buffered() > options.maxLineBytes + 1) {
+      if (buffered() > maxBytes + 1) {
         return dropWith(ErrorCode::LimitExceeded,
-                        "the console sent more than " + std::to_string(options.maxLineBytes) +
-                            " bytes without ending the line",
+                        "the console sent more than " + std::to_string(maxBytes) + " bytes without ending the line",
                         context);
       }
       const size_t pending = buffered();
@@ -336,7 +365,11 @@ struct Session {
   }
 
   Result<StatusLine> readStatus(milliseconds idle, std::string_view context) {
-    auto line = readLine(idle, context);
+    return readStatus(idle, context, options.maxLineBytes);
+  }
+
+  Result<StatusLine> readStatus(milliseconds idle, std::string_view context, size_t maxBytes) {
+    auto line = readLine(idle, context, maxBytes);
     if (!line) return unexpected<Error>(line.error());
     auto status = parseStatusLine(*line);
     if (!status) {
@@ -382,7 +415,7 @@ struct Session {
       auto line = readLine(options.idleTimeout, context);
       if (!line) return unexpected<Error>(line.error());
       if (*line == ".") break;
-      total += line->size() + 2;
+      total += std::max(line->size() + 2, kMinBodyLineCharge);
       if (total > options.maxBodyBytes) {
         return dropWith(ErrorCode::LimitExceeded,
                         "the answer exceeds " + std::to_string(options.maxBodyBytes) + " bytes", context);
@@ -430,9 +463,10 @@ struct Session {
   }
 
   Result<void> greet() {
-    deadline.reset();
-    auto status = readStatus(options.greetingTimeout, "greeting");
+    startDeadline(options.greetingTimeout, "the greeting did not arrive");
+    auto status = readStatus(options.greetingTimeout, "greeting", kMaxShortLineBytes);
     if (!status) return unexpected<Error>(status.error());
+    deadline.reset();
     if (status->code == status::kConnected) {
       std::string text = status->text;
       std::transform(text.begin(), text.end(), text.begin(),
@@ -450,10 +484,10 @@ struct Session {
 
   void sayBye() noexcept {
     if (!connected() || transferActive || buffered() != 0) return;
-    deadline.reset();
+    startDeadline(options.byeTimeout, "the answer to bye did not arrive");
     trace(TraceEvent::Sent, "bye");
     if (!sendBytes(bytesOf("bye\r\n"), options.byeTimeout, "bye")) return;
-    (void)readLine(options.byeTimeout, "bye");
+    (void)readLine(options.byeTimeout, "bye", kMaxShortLineBytes);
   }
 
   void closeConnection() noexcept {
@@ -476,6 +510,8 @@ using detail::Session;
 using std::chrono::milliseconds;
 
 constexpr std::string_view kTransferBusy = "a file transfer owns this connection";
+// DevTool shows a drive table of 42 entries (section 3.2).
+constexpr size_t kMaxDrives = 64;
 
 Result<std::string> buildLine(Command command, const Session &session) {
   return command.finish(session.options.maxCommandBytes);
@@ -513,6 +549,7 @@ bool readAttributes(const Params &params, FileAttributes &out) {
   const auto hi = fields.u32(params, "sizehi");
   const auto lo = fields.u32(params, "sizelo");
   out.size = joinHalves(hi.value_or(0), lo.value_or(0));
+  out.sizeKnown = hi && lo;
   out.createdFileTime = fields.pair(params, "createhi", "createlo");
   out.changedFileTime = fields.pair(params, "changehi", "changelo");
   out.isDirectory = params.hasFlag("directory");
@@ -521,18 +558,29 @@ bool readAttributes(const Params &params, FileAttributes &out) {
   return fields.ok && !params.malformed;
 }
 
-void merge(Params &into, const Params &more) {
-  into.values.insert(into.values.end(), more.values.begin(), more.values.end());
-  into.flags.insert(into.flags.end(), more.flags.begin(), more.flags.end());
-  into.malformed = into.malformed || more.malformed;
+// Adds the first value of each key, and each flag, that `into` does not have yet,
+// so an answer spread over many lines keeps only the fields a command reads.
+void pick(Params &into, const Params &from, std::initializer_list<std::string_view> keys,
+          std::initializer_list<std::string_view> flags = {}) {
+  for (std::string_view key : keys) {
+    if (into.find(key)) continue;
+    if (const std::string *value = from.find(key)) into.values.emplace_back(std::string(key), *value);
+  }
+  for (std::string_view flag : flags) {
+    if (!into.hasFlag(flag) && from.hasFlag(flag)) into.flags.emplace_back(flag);
+  }
+  into.malformed = into.malformed || from.malformed;
 }
 
-bool usableEntryName(std::string_view name) {
-  if (name.empty()) return false;
-  return std::none_of(name.begin(), name.end(), [](char c) {
-    const auto u = static_cast<unsigned char>(c);
-    return c == '\\' || c == '/' || u < 0x20;
-  });
+void pickAttributes(Params &into, const Params &from) {
+  pick(into, from, {"sizehi", "sizelo", "createhi", "createlo", "changehi", "changelo"},
+       {"directory", "readonly", "hidden"});
+}
+
+bool sameName(std::string_view a, std::string_view b) noexcept {
+  return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) {
+           return std::tolower(static_cast<unsigned char>(x)) == std::tolower(static_cast<unsigned char>(y));
+         });
 }
 
 ExecState execStateOf(std::string_view word) {
@@ -545,14 +593,19 @@ ExecState execStateOf(std::string_view word) {
   return ExecState::Unknown;
 }
 
-std::string temporaryName(std::string_view finalName) {
+// ".<8 hex digits>.part"
+std::string randomPartSuffix() {
   static std::atomic<uint32_t> counter{0};
   std::random_device device;
   const uint32_t token = device() ^ (counter.fetch_add(1) * 0x9E3779B9u);
   static constexpr char digits[] = "0123456789abcdef";
   std::string suffix = ".";
   for (int shift = 28; shift >= 0; shift -= 4) suffix.push_back(digits[(token >> shift) & 0xF]);
-  suffix += ".part";
+  return suffix + ".part";
+}
+
+std::string temporaryName(std::string_view finalName) {
+  const std::string suffix = randomPartSuffix();
   const size_t room = kMaxFileNameBytes - suffix.size();
   std::string name(finalName.substr(0, room));
   return name + suffix;
@@ -562,7 +615,98 @@ bool isRefusal(const Error &error) {
   return consoleStatusCode(error).has_value();
 }
 
-// Writes "<final>.part" and moves it over the final name only on commit().
+// A command answered by 202 and a body, or by another accepted status whose text
+// is the only line. Each line goes to visit, parsed, as it arrives.
+template <class Visit>
+Result<void> eachLine(Session &s, Result<std::string> line, std::string_view context,
+                      std::initializer_list<int> accepted, Visit &&visit) {
+  if (!line) return unexpected<Error>(line.error());
+  auto status = s.request(*line, accepted, context);
+  if (!status) return unexpected<Error>(status.error());
+  if (status->code != status::kMultiline) {
+    visit(parseParams(status->text));
+    s.finishCommand();
+    return {};
+  }
+  return s.readBody(context, [&](const std::string &text) -> Result<void> {
+    visit(parseParams(text));
+    return {};
+  });
+}
+
+Result<FileAttributes> fileAttributes(Session &s, const std::string &path) {
+  const std::string context = "getfileattributes " + path;
+  Params all;
+  auto r = eachLine(s, buildLine(Command("getfileattributes").text("name", path), s), context,
+                    {status::kOk, status::kMultiline}, [&](const Params &params) { pickAttributes(all, params); });
+  if (!r) return unexpected<Error>(r.error());
+  FileAttributes attributes;
+  if (!readAttributes(all, attributes)) return fail(ErrorCode::Protocol, context + ": malformed answer");
+  return attributes;
+}
+
+// `folder` is canonical.
+Result<DirListing> listFolder(Session &s, const std::string &folder) {
+  std::string target = folder;
+  if (target.back() != '\\') target.push_back('\\');
+  auto line = buildLine(Command("dirlist").text("name", target), s);
+  if (!line) return unexpected<Error>(line.error());
+  const std::string context = "dirlist " + target;
+  auto status = s.request(*line, {status::kMultiline}, context);
+  if (!status) return unexpected<Error>(status.error());
+
+  DirListing listing;
+  auto body = s.readBody(context, [&](const std::string &text) -> Result<void> {
+    const Params params = parseParams(text);
+    DirEntry entry;
+    const std::string *name = params.find("name");
+    if (name && (*name == "." || *name == "..")) return {};
+    if (!name || !validateName(*name) || !readAttributes(params, entry)) {
+      ++listing.skipped;
+      spdlog::debug("{}: skipping entry '{}'", context, detail::preview(text));
+      return {};
+    }
+    entry.name = *name;
+    listing.entries.push_back(std::move(entry));
+    return {};
+  });
+  if (!body) return unexpected<Error>(body.error());
+  return listing;
+}
+
+// getfileattributes, completed from the parent folder's listing when the console
+// does not know the command (407) or, with needSize, sent no size (section 3.4).
+// nullopt when the path does not exist: any other 4xx, or not in the listing.
+Result<std::optional<FileAttributes>> lookUp(Session &s, const std::string &path, bool needSize) {
+  std::optional<FileAttributes> known;
+  if (auto direct = fileAttributes(s, path)) {
+    if (!needSize || direct->sizeKnown) return std::optional<FileAttributes>(*direct);
+    known = *direct;
+  } else if (consoleStatusCode(direct.error()) != status::kInvalidCommand) {
+    if (isRefusal(direct.error())) return std::optional<FileAttributes>{};
+    return unexpected<Error>(direct.error());
+  }
+  auto parent = parentOf(path);
+  auto name = nameOf(path);
+  if (!parent || !name) return known;
+  auto listing = listFolder(s, *parent);
+  if (!listing) {
+    if (isRefusal(listing.error())) return known;
+    return unexpected<Error>(listing.error());
+  }
+  for (const DirEntry &entry : listing->entries) {
+    if (sameName(entry.name, *name)) return std::optional<FileAttributes>(static_cast<const FileAttributes &>(entry));
+  }
+  return known;
+}
+
+bool hostPathTaken(const std::filesystem::path &path) {
+  std::error_code ec;
+  return std::filesystem::symlink_status(path, ec).type() != std::filesystem::file_type::not_found;
+}
+
+// Writes "<final>.part", or "<final>.<random>.part" when that name is taken, and
+// moves it over the final name only on commit().
 class HostFile {
 public:
   HostFile() = default;
@@ -584,6 +728,15 @@ public:
     final_ = finalPath;
     temp_ = finalPath;
     temp_ += ".part";
+    for (int attempt = 0; hostPathTaken(temp_); ++attempt) {
+      if (attempt == 16) {
+        const std::string name = pathToUtf8(temp_);
+        temp_.clear();
+        return fail(ErrorCode::Io, "no free temporary name next to '" + name + "'");
+      }
+      temp_ = finalPath;
+      temp_ += randomPartSuffix();
+    }
     out_.open(temp_, std::ios::binary | std::ios::trunc);
     if (!out_) {
       const std::string name = pathToUtf8(temp_);
@@ -822,9 +975,10 @@ Result<void> FileWriter::finish() {
       return s.failed(makeError(session.cancelled ? ErrorCode::Cancelled : ErrorCode::NotConnected,
                                 s.context() + ": the connection is closed"));
     }
-    session.deadline.reset();
-    auto status = session.expect(session.readStatus(session.options.slowIdleTimeout, s.context()), {status::kOk},
-                                 s.context());
+    session.startDeadline();
+    auto status = session.expect(
+        session.readStatus(session.options.slowIdleTimeout, s.context(), detail::kMaxShortLineBytes), {status::kOk},
+        s.context());
     if (!status) {
       if (!isRefusal(status.error())) return s.failed(status.error());
       session.transferActive = false;
@@ -837,27 +991,13 @@ Result<void> FileWriter::finish() {
   s.open = false;
 
   // The data is on the console under the temporary name. Replace the final name.
-  auto existing = [&]() -> Result<FileAttributes> {
-    auto line = Command("getfileattributes").text("name", s.path).finish(session.options.maxCommandBytes);
-    if (!line) return unexpected<Error>(line.error());
-    auto status = session.request(*line, {status::kOk, status::kMultiline}, "getfileattributes " + s.path);
-    if (!status) return unexpected<Error>(status.error());
-    Params params = parseParams(status->code == status::kOk ? status->text : std::string());
-    if (status->code == status::kMultiline) {
-      auto body = session.readBody("getfileattributes " + s.path, [&](const std::string &l) -> Result<void> {
-        merge(params, parseParams(l));
-        return {};
-      });
-      if (!body) return unexpected<Error>(body.error());
-    }
-    session.finishCommand();
-    FileAttributes attributes;
-    readAttributes(params, attributes);
-    return attributes;
-  }();
-
+  // Once the old file may be gone, the temporary file can hold the only copy of
+  // either version and is never deleted.
+  std::string_view finalRemoved;
   auto giveUp = [&](Error error) -> Result<void> {
-    if (session.connected()) {
+    if (!finalRemoved.empty()) {
+      error.message += "; the upload is kept as " + s.tempPath + ", since " + s.path + " " + std::string(finalRemoved);
+    } else if (session.connected()) {
       s.removeTemporary();
     } else {
       session.pendingCleanup.push_back(s.tempPath);
@@ -865,17 +1005,22 @@ Result<void> FileWriter::finish() {
     return unexpected<Error>(std::move(error));
   };
 
-  if (existing) {
-    if (existing->isDirectory) {
+  auto existing = lookUp(session, s.path, false);
+  if (!existing) return giveUp(existing.error());
+  if (*existing) {
+    if ((*existing)->isDirectory) {
       return giveUp(makeError(ErrorCode::InvalidArgument, s.context() + ": a folder of that name exists"));
     }
     auto line = Command("delete").text("name", s.path).finish(session.options.maxCommandBytes);
     if (!line) return giveUp(line.error());
     auto removed = session.request(*line, {status::kOk}, "delete " + s.path);
-    if (!removed) return giveUp(removed.error());
+    if (!removed) {
+      // Without an answer the delete may have happened.
+      if (!isRefusal(removed.error())) finalRemoved = "may have been deleted";
+      return giveUp(removed.error());
+    }
     session.finishCommand();
-  } else if (!isRefusal(existing.error())) {
-    return giveUp(existing.error());
+    finalRemoved = "was deleted";
   }
 
   auto line = Command("rename").text("name", s.tempPath).text("newname", s.path).finish(session.options.maxCommandBytes);
@@ -943,7 +1088,7 @@ Result<XbdmClient> XbdmClient::open(Connector connector, ClientOptions options) 
 Result<XbdmClient> XbdmClient::attach(net::TransportPtr transport, ClientOptions options, Connector connector) {
   if (!transport) return fail(ErrorCode::ConnectFailed, "no transport");
   auto session = std::make_shared<Session>(std::move(options), std::move(connector));
-  session->install(std::move(transport));
+  session->install(std::move(transport), 0);
   if (auto r = session->greet(); !r) return unexpected<Error>(r.error());
   spdlog::debug("connected to XBDM at {}", session->transport->describe());
   return XbdmClient(std::move(session));
@@ -984,11 +1129,14 @@ Result<void> XbdmClient::reconnect() {
   auto &s = *session_;
   if (s.transferActive) return fail(ErrorCode::InvalidArgument, std::string("reconnect: ") + std::string(kTransferBusy));
   if (!s.connector) return fail(ErrorCode::Unsupported, "reconnect: the client was attached without a connector");
+  const uint64_t epoch = s.cancelEpoch;
   s.closeConnection();
   auto transport = s.connector();
   if (!transport) return unexpected<Error>(transport.error());
   if (!*transport) return fail(ErrorCode::ConnectFailed, "reconnect: the connector returned no transport");
-  s.install(std::move(*transport));
+  if (!s.install(std::move(*transport), epoch)) {
+    return fail(ErrorCode::Cancelled, "reconnect: cancelled while the connection was being made");
+  }
   if (auto r = s.greet(); !r) return r;
 
   while (!s.pendingCleanup.empty()) {
@@ -1029,31 +1177,11 @@ Result<std::string> singleLine(Session &s, Result<std::string> line, std::string
   return status->text;
 }
 
-// A command answered by 202 and a body; returns the parsed lines.
-Result<std::vector<Params>> multiLine(Session &s, Result<std::string> line, std::string_view context,
-                                      std::initializer_list<int> accepted = {status::kMultiline}) {
-  if (!line) return unexpected<Error>(line.error());
-  auto status = s.request(*line, accepted, context);
-  if (!status) return unexpected<Error>(status.error());
-  std::vector<Params> lines;
-  if (status->code != status::kMultiline) {
-    lines.push_back(parseParams(status->text));
-    s.finishCommand();
-    return lines;
-  }
-  auto body = s.readBody(context, [&](const std::string &text) -> Result<void> {
-    lines.push_back(parseParams(text));
-    return {};
-  });
-  if (!body) return unexpected<Error>(body.error());
-  return lines;
-}
-
 Result<XbeInfo> xbeInfo(Session &s, Result<std::string> line, std::string_view context) {
-  auto lines = multiLine(s, std::move(line), context);
-  if (!lines) return unexpected<Error>(lines.error());
   Params all;
-  for (const auto &params : *lines) merge(all, params);
+  auto r = eachLine(s, std::move(line), context, {status::kMultiline},
+                    [&](const Params &params) { pick(all, params, {"name", "timestamp", "checksum"}); });
+  if (!r) return unexpected<Error>(r.error());
   const std::string *name = all.find("name");
   if (!name) return fail(ErrorCode::Protocol, std::string(context) + ": the answer has no name");
   XbeInfo info;
@@ -1103,6 +1231,42 @@ int hexDigit(char c) noexcept {
   if (c >= 'a' && c <= 'f') return c - 'a' + 10;
   if (c >= 'A' && c <= 'F') return c - 'A' + 10;
   return -1;
+}
+
+// One getmem request; appends its bytes to `into`.
+Result<void> readMemoryText(Session &session, uint32_t address, uint32_t length, MemoryRead &into) {
+  const std::string context = "getmem " + formatNumber(address);
+  auto line = buildLine(Command("getmem").number("addr", address).number("length", length), session);
+  if (!line) return unexpected<Error>(line.error());
+  auto status = session.request(*line, {status::kMultiline}, context);
+  if (!status) return unexpected<Error>(status.error());
+
+  const size_t start = into.data.size();
+  auto body = session.readBody(context, [&](const std::string &text) -> Result<void> {
+    if (text.size() % 2 != 0) return fail(ErrorCode::Protocol, context + ": odd number of hex digits");
+    if (into.data.size() - start + text.size() / 2 > length) {
+      return fail(ErrorCode::Protocol, context + ": more than the " + std::to_string(length) + " bytes asked for");
+    }
+    for (size_t i = 0; i < text.size(); i += 2) {
+      if (text[i] == '?' || text[i + 1] == '?') {
+        into.data.push_back(0);
+        into.readable.push_back(false);
+        continue;
+      }
+      const int hi = hexDigit(text[i]);
+      const int lo = hexDigit(text[i + 1]);
+      if (hi < 0 || lo < 0) return fail(ErrorCode::Protocol, context + ": '" + detail::preview(text) + "' is not hex");
+      into.data.push_back(static_cast<uint8_t>((hi << 4) | lo));
+      into.readable.push_back(true);
+    }
+    return {};
+  });
+  if (!body) return unexpected<Error>(body.error());
+  if (into.data.size() - start != length) {
+    return fail(ErrorCode::Protocol, context + ": " + std::to_string(into.data.size() - start) + " of " +
+                                         std::to_string(length) + " bytes received");
+  }
+  return {};
 }
 
 } // namespace
@@ -1193,13 +1357,21 @@ Result<ConsoleInfo> XbdmClient::consoleInfo() {
 Result<std::vector<std::string>> XbdmClient::drives() {
   auto s = sessionOf(session_);
   if (!s) return unexpected<Error>(s.error());
-  auto lines = multiLine(**s, buildLine(Command("drivelist"), **s), "drivelist");
-  if (!lines) return unexpected<Error>(lines.error());
   std::vector<std::string> names;
-  for (const auto &params : *lines) {
-    const std::string *name = params.find("drivename");
-    if (name && validateDriveName(*name)) names.push_back(*name);
-  }
+  size_t ignored = 0;
+  auto r = eachLine(**s, buildLine(Command("drivelist"), **s), "drivelist", {status::kMultiline},
+                    [&](const Params &params) {
+                      const std::string *name = params.find("drivename");
+                      if (!name || !validateDriveName(*name)) return;
+                      if (std::any_of(names.begin(), names.end(),
+                                      [&](const std::string &known) { return sameName(known, *name); })) {
+                        return;
+                      }
+                      if (names.size() < kMaxDrives) names.push_back(*name);
+                      else ++ignored;
+                    });
+  if (!r) return unexpected<Error>(r.error());
+  if (ignored > 0) spdlog::warn("drivelist: ignoring {} drives after the first {}", ignored, kMaxDrives);
   return names;
 }
 
@@ -1212,11 +1384,14 @@ Result<DriveSpace> XbdmClient::driveSpace(const std::string &drive) {
   if (auto r = validateDriveName(name); !r) return unexpected<Error>(r.error());
   const std::string root = std::string(name) + ":\\";
 
-  auto lines = multiLine(**s, buildLine(Command("drivefreespace").text("name", root), **s), "drivefreespace " + root,
-                         {status::kOk, status::kMultiline});
-  if (!lines) return unexpected<Error>(lines.error());
   Params all;
-  for (const auto &params : *lines) merge(all, params);
+  auto r = eachLine(**s, buildLine(Command("drivefreespace").text("name", root), **s), "drivefreespace " + root,
+                    {status::kOk, status::kMultiline}, [&](const Params &params) {
+                      pick(all, params,
+                           {"freetocallerhi", "freetocallerlo", "totalbyteshi", "totalbyteslo", "totalfreebyteshi",
+                            "totalfreebyteslo"});
+                    });
+  if (!r) return unexpected<Error>(r.error());
   Fields fields;
   const auto free = fields.pair(all, "freetocallerhi", "freetocallerlo");
   const auto total = fields.pair(all, "totalbyteshi", "totalbyteslo");
@@ -1232,32 +1407,7 @@ Result<DirListing> XbdmClient::list(const std::string &directory) {
   if (!s) return unexpected<Error>(s.error());
   auto canonical = canonicalPath(directory);
   if (!canonical) return unexpected<Error>(canonical.error());
-  std::string target = *canonical;
-  if (target.back() != '\\') target.push_back('\\');
-
-  auto line = buildLine(Command("dirlist").text("name", target), **s);
-  if (!line) return unexpected<Error>(line.error());
-  const std::string context = "dirlist " + target;
-  auto status = (*s)->request(*line, {status::kMultiline}, context);
-  if (!status) return unexpected<Error>(status.error());
-
-  DirListing listing;
-  auto body = (*s)->readBody(context, [&](const std::string &text) -> Result<void> {
-    const Params params = parseParams(text);
-    DirEntry entry;
-    const std::string *name = params.find("name");
-    if (name && (*name == "." || *name == "..")) return {};
-    if (!name || !usableEntryName(*name) || !readAttributes(params, entry)) {
-      ++listing.skipped;
-      spdlog::debug("{}: skipping entry '{}'", context, detail::preview(text));
-      return {};
-    }
-    entry.name = *name;
-    listing.entries.push_back(std::move(entry));
-    return {};
-  });
-  if (!body) return unexpected<Error>(body.error());
-  return listing;
+  return listFolder(**s, *canonical);
 }
 
 Result<FileAttributes> XbdmClient::attributes(const std::string &path) {
@@ -1265,15 +1415,7 @@ Result<FileAttributes> XbdmClient::attributes(const std::string &path) {
   if (!s) return unexpected<Error>(s.error());
   auto canonical = canonicalPath(path);
   if (!canonical) return unexpected<Error>(canonical.error());
-  const std::string context = "getfileattributes " + *canonical;
-  auto lines = multiLine(**s, buildLine(Command("getfileattributes").text("name", *canonical), **s), context,
-                         {status::kOk, status::kMultiline});
-  if (!lines) return unexpected<Error>(lines.error());
-  Params all;
-  for (const auto &params : *lines) merge(all, params);
-  FileAttributes attributes;
-  if (!readAttributes(all, attributes)) return fail(ErrorCode::Protocol, context + ": malformed answer");
-  return attributes;
+  return fileAttributes(**s, *canonical);
 }
 
 Result<void> XbdmClient::makeDirectory(const std::string &path) {
@@ -1413,15 +1555,17 @@ Result<FileWriter> XbdmClient::openWrite(const std::string &path, uint64_t size)
 
 Result<void> XbdmClient::downloadToFile(const std::string &path, const std::filesystem::path &hostPath,
                                         Progress progress) {
+  auto s = sessionOf(session_);
+  if (!s) return unexpected<Error>(s.error());
+  auto canonical = filePath(path);
+  if (!canonical) return unexpected<Error>(canonical.error());
   HostFile out;
   if (auto r = out.open(hostPath); !r) return r;
+  auto known = lookUp(**s, *canonical, true);
+  if (!known) return unexpected<Error>(known.error());
   std::optional<uint64_t> expectedSize;
-  if (auto known = attributes(path)) {
-    expectedSize = known->size;
-  } else if (!isRefusal(known.error())) {
-    return unexpected<Error>(known.error());
-  }
-  auto reader = openRead(path, expectedSize);
+  if (*known && (*known)->sizeKnown) expectedSize = (*known)->size;
+  auto reader = openRead(*canonical, expectedSize);
   if (!reader) return unexpected<Error>(reader.error());
   std::vector<uint8_t> chunk(static_cast<size_t>(std::min<uint64_t>(kTransferChunkBytes, std::max<uint64_t>(reader->size(), 1))));
   if (progress) progress(0, reader->size());
@@ -1586,42 +1730,16 @@ Result<MemoryRead> XbdmClient::getMemory(uint32_t address, uint32_t length) {
   auto s = sessionOf(session_);
   if (!s) return unexpected<Error>(s.error());
   auto &session = **s;
-  const std::string context = "getmem " + formatNumber(address);
-  if (auto r = checkRange(address, length, session.options.maxMemoryReadBytes, context); !r) {
+  if (auto r = checkRange(address, length, session.options.maxMemoryReadBytes, "getmem " + formatNumber(address)); !r) {
     return unexpected<Error>(r.error());
   }
-  auto line = buildLine(Command("getmem").number("addr", address).number("length", length), session);
-  if (!line) return unexpected<Error>(line.error());
-  auto status = session.request(*line, {status::kMultiline}, context);
-  if (!status) return unexpected<Error>(status.error());
-
   MemoryRead result;
   result.address = address;
   result.data.reserve(length);
   result.readable.reserve(length);
-  auto body = session.readBody(context, [&](const std::string &text) -> Result<void> {
-    if (text.size() % 2 != 0) return fail(ErrorCode::Protocol, context + ": odd number of hex digits");
-    if (result.data.size() + text.size() / 2 > length) {
-      return fail(ErrorCode::Protocol, context + ": more than the " + std::to_string(length) + " bytes asked for");
-    }
-    for (size_t i = 0; i < text.size(); i += 2) {
-      if (text[i] == '?' || text[i + 1] == '?') {
-        result.data.push_back(0);
-        result.readable.push_back(false);
-        continue;
-      }
-      const int hi = hexDigit(text[i]);
-      const int lo = hexDigit(text[i + 1]);
-      if (hi < 0 || lo < 0) return fail(ErrorCode::Protocol, context + ": '" + detail::preview(text) + "' is not hex");
-      result.data.push_back(static_cast<uint8_t>((hi << 4) | lo));
-      result.readable.push_back(true);
-    }
-    return {};
-  });
-  if (!body) return unexpected<Error>(body.error());
-  if (result.data.size() != length) {
-    return fail(ErrorCode::Protocol, context + ": " + std::to_string(result.data.size()) + " of " +
-                                         std::to_string(length) + " bytes received");
+  for (uint32_t offset = 0; offset < length; offset += kGetMemChunkBytes) {
+    const uint32_t piece = std::min(kGetMemChunkBytes, length - offset);
+    if (auto r = readMemoryText(session, address + offset, piece, result); !r) return unexpected<Error>(r.error());
   }
   return result;
 }
@@ -1690,28 +1808,25 @@ Result<void> XbdmClient::setMemory(uint32_t address, std::span<const uint8_t> da
 Result<std::vector<MemoryRegion>> XbdmClient::memoryRegions() {
   auto s = sessionOf(session_);
   if (!s) return unexpected<Error>(s.error());
-  auto lines = multiLine(**s, buildLine(Command("walkmem"), **s), "walkmem");
-  if (!lines) return unexpected<Error>(lines.error());
   std::vector<MemoryRegion> regions;
-  for (const auto &params : *lines) {
+  auto r = eachLine(**s, buildLine(Command("walkmem"), **s), "walkmem", {status::kMultiline}, [&](const Params &params) {
     Fields fields;
     const auto base = fields.u32(params, "base");
     const auto size = fields.u32(params, "size");
     const auto protect = fields.u32(params, "protect");
     const auto phys = fields.u32(params, "phys");
-    if (!fields.ok || !base || !size) continue;
+    if (!fields.ok || !base || !size) return;
     regions.push_back(MemoryRegion{*base, *size, protect.value_or(0), phys.value_or(0)});
-  }
+  });
+  if (!r) return unexpected<Error>(r.error());
   return regions;
 }
 
 Result<std::vector<Module>> XbdmClient::modules() {
   auto s = sessionOf(session_);
   if (!s) return unexpected<Error>(s.error());
-  auto lines = multiLine(**s, buildLine(Command("modules"), **s), "modules");
-  if (!lines) return unexpected<Error>(lines.error());
   std::vector<Module> list;
-  for (const auto &params : *lines) {
+  auto r = eachLine(**s, buildLine(Command("modules"), **s), "modules", {status::kMultiline}, [&](const Params &params) {
     Fields fields;
     const std::string *name = params.find("name");
     const auto base = fields.u32(params, "base");
@@ -1720,12 +1835,13 @@ Result<std::vector<Module>> XbdmClient::modules() {
     module.checksum = fields.u32(params, "check");
     module.timestamp = fields.u32(params, "timestamp");
     module.originalSize = fields.u32(params, "osize");
-    if (!fields.ok || !name || !base || !size) continue;
+    if (!fields.ok || !name || !base || !size) return;
     module.name = *name;
     module.base = *base;
     module.size = *size;
     list.push_back(std::move(module));
-  }
+  });
+  if (!r) return unexpected<Error>(r.error());
   return list;
 }
 
@@ -1733,23 +1849,23 @@ Result<std::vector<ModuleSection>> XbdmClient::moduleSections(const std::string 
   auto s = sessionOf(session_);
   if (!s) return unexpected<Error>(s.error());
   if (module.empty()) return fail(ErrorCode::InvalidArgument, "modsections: empty module name");
-  auto lines = multiLine(**s, buildLine(Command("modsections").text("name", module), **s), "modsections " + module);
-  if (!lines) return unexpected<Error>(lines.error());
   std::vector<ModuleSection> sections;
-  for (const auto &params : *lines) {
-    Fields fields;
-    const std::string *name = params.find("name");
-    const auto base = fields.u32(params, "base");
-    const auto size = fields.u32(params, "size");
-    ModuleSection section;
-    section.index = fields.u32(params, "index");
-    section.flags = fields.u32(params, "flags");
-    if (!fields.ok || !name || !base || !size) continue;
-    section.name = *name;
-    section.base = *base;
-    section.size = *size;
-    sections.push_back(std::move(section));
-  }
+  auto r = eachLine(**s, buildLine(Command("modsections").text("name", module), **s), "modsections " + module,
+                    {status::kMultiline}, [&](const Params &params) {
+                      Fields fields;
+                      const std::string *name = params.find("name");
+                      const auto base = fields.u32(params, "base");
+                      const auto size = fields.u32(params, "size");
+                      ModuleSection section;
+                      section.index = fields.u32(params, "index");
+                      section.flags = fields.u32(params, "flags");
+                      if (!fields.ok || !name || !base || !size) return;
+                      section.name = *name;
+                      section.base = *base;
+                      section.size = *size;
+                      sections.push_back(std::move(section));
+                    });
+  if (!r) return unexpected<Error>(r.error());
   return sections;
 }
 

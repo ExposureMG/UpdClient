@@ -253,13 +253,56 @@ TEST(XbdmTransfer, DownloadToFileIsBoundedByTheFileSize) {
   CHECK_ERR(other.downloadToFile("HDD:\\f.bin", dir.file("f.bin")), ErrorCode::LimitExceeded);
   CHECK(dir.entries().empty());
 
+  // A console without getfileattributes: the size comes from the listing (section 3.4).
   auto old = FakeConsole::create();
   old->on("getfileattributes name=\"HDD:\\f.bin\"", "407- unknown command\r\n");
+  old->on("dirlist name=\"HDD:\\\"",
+          "202- multiline response follows\r\nname=\"F.BIN\" sizehi=0x0 sizelo=0x2\r\n.\r\n");
   old->on("getfile name=\"HDD:\\f.bin\"", "203- binary response follows\r\n" + ut::textOf(le32(3)) + "abc");
   auto third = connected(old);
-  REQUIRE_OK(third.downloadToFile("HDD:\\f.bin", dir.file("f.bin")));
-  CHECK_EQ(ut::readFile(dir.file("f.bin")).value_or(ut::Bytes{}), ut::bytesOf("abc"));
+  CHECK_ERR(third.downloadToFile("HDD:\\f.bin", dir.file("f.bin")), ErrorCode::LimitExceeded);
+  CHECK(dir.entries().empty());
   CHECK_EQ(old->problems(), std::string());
+
+  // Neither answer has a size: the download goes ahead without the bound.
+  auto bare = FakeConsole::create();
+  bare->on("getfileattributes name=\"HDD:\\f.bin\"", "200- OK\r\n");
+  bare->on("dirlist name=\"HDD:\\\"", "414- access denied\r\n");
+  bare->on("getfile name=\"HDD:\\f.bin\"", "203- binary response follows\r\n" + ut::textOf(le32(3)) + "abc");
+  auto fourth = connected(bare);
+  REQUIRE_OK(fourth.downloadToFile("HDD:\\f.bin", dir.file("f.bin")));
+  CHECK_EQ(ut::readFile(dir.file("f.bin")).value_or(ut::Bytes{}), ut::bytesOf("abc"));
+  CHECK_EQ(bare->problems(), std::string());
+
+  // A 202 without sizehi and sizelo, completed from the listing.
+  auto partial = FakeConsole::create();
+  partial->on("getfileattributes name=\"HDD:\\d\\g.bin\"",
+              "202- multiline response follows\r\ncreatehi=0x1 createlo=0x2\r\n.\r\n");
+  partial->on("dirlist name=\"HDD:\\d\\\"",
+              "202- multiline response follows\r\nname=\"other\" sizehi=0x0 sizelo=0x9\r\n"
+              "name=\"g.bin\" sizehi=0x0 sizelo=0x5\r\n.\r\n");
+  partial->on("getfile name=\"HDD:\\d\\g.bin\"", "203- binary response follows\r\n" + ut::textOf(le32(5)) + "hello");
+  auto fifth = connected(partial);
+  REQUIRE_OK(fifth.downloadToFile("HDD:\\d\\g.bin", dir.file("g.bin")));
+  CHECK_EQ(ut::readFile(dir.file("g.bin")).value_or(ut::Bytes{}), ut::bytesOf("hello"));
+  CHECK_EQ(partial->problems(), std::string());
+}
+
+TEST(XbdmTransfer, DownloadToFileLeavesAFileNamedLikeItsTemporaryFileAlone) {
+  ut::TempDir dir;
+  REQUIRE(dir.ok());
+  REQUIRE(ut::writeFile(dir.file("out.bin.part"), ut::bytesOf("mine")));
+  Files fs;
+  fs.files["HDD:\\f.bin"] = ut::bytesOf("console");
+  auto console = FakeConsole::create();
+  fs.install(*console);
+  auto client = connected(console);
+  REQUIRE_OK(client.downloadToFile("HDD:\\f.bin", dir.file("out.bin")));
+  CHECK_EQ(ut::readFile(dir.file("out.bin")).value_or(ut::Bytes{}), ut::bytesOf("console"));
+  CHECK_EQ(ut::readFile(dir.file("out.bin.part")).value_or(ut::Bytes{}), ut::bytesOf("mine"));
+  CHECK_ERR(client.downloadToFile("HDD:\\missing.bin", dir.file("out.bin")), ErrorCode::Io);
+  CHECK_EQ(ut::readFile(dir.file("out.bin.part")).value_or(ut::Bytes{}), ut::bytesOf("mine"));
+  CHECK_EQ(dir.entries(), (std::vector<std::string>{"out.bin", "out.bin.part"}));
 }
 
 TEST(XbdmTransfer, UploadGoesToATemporaryNameAndIsRenamedAfterTheConsoleConfirmed) {
@@ -315,6 +358,105 @@ TEST(XbdmTransfer, UploadReplacesAnExistingFile) {
   REQUIRE_EQ(console->commands().size(), size_t{4});
   CHECK_EQ(console->commands()[2], std::string("delete name=\"HDD:\\x.txt\""));
   CHECK_EQ(console->problems(), std::string());
+}
+
+TEST(XbdmTransfer, AFailedRenameAfterTheOldFileWasDeletedKeepsTheUpload) {
+  // Refused: the temporary file is the only copy of either version.
+  {
+    Files fs;
+    fs.files["HDD:\\x.txt"] = ut::bytesOf("old");
+    fs.renameStatus = 414;
+    auto console = FakeConsole::create();
+    fs.install(*console);
+    auto client = connected(console);
+    auto writer = client.openWrite("HDD:\\x.txt", 3);
+    REQUIRE_OK(writer);
+    const std::string temp = writer->temporaryPath();
+    REQUIRE_OK(writer->write(ut::bytesOf("new")));
+    auto r = writer->finish();
+    REQUIRE(!r);
+    CHECK_EQ(consoleStatusCode(r.error()).value_or(0), 414);
+    CHECK_MSG(r.error().message.find("kept as " + temp) != std::string::npos, r.error().message);
+    CHECK_EQ(fs.names(), std::vector<std::string>{temp});
+    CHECK_EQ(fs.files[temp], ut::bytesOf("new"));
+    CHECK(console->lastCommand().rfind("rename ", 0) == 0);
+    CHECK(client.isConnected());
+    CHECK(client.pendingCleanup().empty());
+  }
+  // The connection drops at the rename, or at the delete before it: whether
+  // either happened is unknown, so nothing is queued for deletion.
+  for (const std::string dropAt : {"rename ", "delete "}) {
+    Files fs;
+    fs.files["HDD:\\x.txt"] = ut::bytesOf("old");
+    auto console = FakeConsole::create();
+    console->handle([&fs, dropAt](FakeConsole &c, const std::string &line) {
+      if (line.rfind(dropAt, 0) == 0) {
+        c.hangUp();
+        return;
+      }
+      fs.serve(c, line);
+    });
+    auto next = FakeConsole::create();
+    fs.install(*next);
+    auto queue = std::make_shared<xt::ConsoleQueue>(xt::ConsoleQueue{next});
+    auto client = connected(console, xt::quickOptions(), xt::connectorFor(queue));
+    auto writer = client.openWrite("HDD:\\x.txt", 3);
+    REQUIRE_OK(writer);
+    const std::string temp = writer->temporaryPath();
+    REQUIRE_OK(writer->write(ut::bytesOf("new")));
+    auto r = writer->finish();
+    REQUIRE_ERR(r, ErrorCode::Disconnected);
+    CHECK_MSG(r.error().message.find("kept as " + temp) != std::string::npos, r.error().message);
+    CHECK(client.pendingCleanup().empty());
+    REQUIRE_OK(client.reconnect());
+    CHECK(next->commands().empty());
+    CHECK(fs.files.count(temp) == 1);
+  }
+  // Refused before the old file was deleted: it is still there, so the
+  // temporary file goes.
+  {
+    Files fs;
+    fs.files["HDD:\\x.txt"] = ut::bytesOf("old");
+    auto console = FakeConsole::create();
+    console->handle([&fs](FakeConsole &c, const std::string &line) {
+      if (line == "delete name=\"HDD:\\x.txt\"") {
+        c.line("414- access denied");
+        return;
+      }
+      fs.serve(c, line);
+    });
+    auto client = connected(console);
+    auto writer = client.openWrite("HDD:\\x.txt", 3);
+    REQUIRE_OK(writer);
+    REQUIRE_OK(writer->write(ut::bytesOf("new")));
+    CHECK_ERR(writer->finish(), ErrorCode::Io);
+    CHECK_EQ(fs.names(), std::vector<std::string>{"HDD:\\x.txt"});
+    CHECK_EQ(fs.files["HDD:\\x.txt"], ut::bytesOf("old"));
+  }
+}
+
+TEST(XbdmTransfer, UploadFindsTheFileToReplaceInTheListingWithoutGetfileattributes) {
+  Files fs;
+  fs.files["HDD:\\d\\x.txt"] = ut::bytesOf("old");
+  auto console = FakeConsole::create();
+  console->handle([&fs](FakeConsole &c, const std::string &line) {
+    if (line.rfind("getfileattributes ", 0) == 0) {
+      c.line("407- unknown command");
+    } else if (line == "dirlist name=\"HDD:\\d\\\"") {
+      c.multiline({"name=\"X.TXT\" sizehi=0x0 sizelo=0x3"});
+    } else {
+      fs.serve(c, line);
+    }
+  });
+  auto client = connected(console);
+  auto writer = client.openWrite("HDD:\\d\\x.txt", 3);
+  REQUIRE_OK(writer);
+  REQUIRE_OK(writer->write(ut::bytesOf("new")));
+  REQUIRE_OK(writer->finish());
+  CHECK_EQ(fs.names(), std::vector<std::string>{"HDD:\\d\\x.txt"});
+  CHECK_EQ(fs.files["HDD:\\d\\x.txt"], ut::bytesOf("new"));
+  REQUIRE_EQ(console->commands().size(), size_t{5});
+  CHECK_EQ(console->commands()[3], std::string("delete name=\"HDD:\\d\\x.txt\""));
 }
 
 TEST(XbdmTransfer, UploadOntoAFolderFailsAndRemovesTheTemporaryFile) {

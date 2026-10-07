@@ -145,6 +145,69 @@ TEST(XbdmFraming, BodiesAboveTheLimitDropTheConnection) {
   CHECK(!client.isConnected());
 }
 
+TEST(XbdmFraming, EveryBodyLineCountsAtLeast64Bytes) {
+  // Short lines cost more memory once parsed than on the wire.
+  ClientOptions options = xt::quickOptions();
+  options.maxBodyBytes = 64 * 100;
+  {
+    auto console = FakeConsole::create();
+    console->on("modules", "202- multiline response follows\r\n" + std::string(100, '\n') + ".\r\n");
+    auto client = connected(console, options);
+    CHECK_OK(client.modules());
+  }
+  {
+    auto console = FakeConsole::create();
+    console->on("modules", "202- multiline response follows\r\n" + std::string(101, '\n') + ".\r\n");
+    auto client = connected(console, options);
+    CHECK_ERR(client.modules(), ErrorCode::LimitExceeded);
+    CHECK(!client.isConnected());
+  }
+}
+
+TEST(XbdmFraming, AnswersSpreadOverManyLinesKeepTheFirstValues) {
+  auto console = FakeConsole::create();
+  std::string body = "202- multiline response follows\r\nsizehi=0x0 sizelo=0x10 readonly\r\n";
+  for (int i = 0; i < 2000; ++i) body += "x y z sizelo=0x99 directory\r\n";
+  console->on("getfileattributes name=\"HDD:\\a\"", body + "changehi=0x1 changelo=0x2\r\n.\r\n");
+  auto client = connected(console);
+  auto a = client.attributes("HDD:\\a");
+  REQUIRE_OK(a);
+  CHECK_EQ(a->size, uint64_t{0x10});
+  CHECK(a->sizeKnown);
+  CHECK(a->isReadOnly);
+  CHECK(a->isDirectory);
+  CHECK_EQ(a->changedFileTime.value_or(0), uint64_t{0x100000002});
+  CHECK_EQ(console->problems(), std::string());
+}
+
+TEST(XbdmFraming, ShortStatusLinesHaveASmallLimit) {
+  // The greeting, the answer to bye and the status after sendfile data.
+  {
+    auto console = FakeConsole::create(false);
+    console->line("201- " + std::string(600, 'c'));
+    CHECK_ERR(xt::attach(console), ErrorCode::LimitExceeded);
+  }
+  {
+    auto console = FakeConsole::create(false);
+    console->send("201- " + std::string(100000, 'c'));
+    CHECK_ERR(xt::attach(console), ErrorCode::LimitExceeded);
+    CHECK(console->unread() > 0);
+  }
+  {
+    auto console = FakeConsole::create();
+    console->handle([](FakeConsole &c, const std::string &) {
+      c.line("204- send binary data");
+      c.expectBinary(2, [](FakeConsole &done, const ut::Bytes &) { done.line("200- " + std::string(600, 'k')); });
+    });
+    auto client = connected(console);
+    auto writer = client.openWrite("HDD:\\f.bin", 2);
+    REQUIRE_OK(writer);
+    REQUIRE_OK(writer->write(ut::Bytes{1, 2}));
+    CHECK_ERR(writer->finish(), ErrorCode::LimitExceeded);
+    CHECK(!client.isConnected());
+  }
+}
+
 TEST(XbdmFraming, BogusDownloadLengthsAreRefusedBeforeTheBody) {
   {
     auto console = FakeConsole::create();
