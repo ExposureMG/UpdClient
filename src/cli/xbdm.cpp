@@ -3,11 +3,13 @@
 #include "cli/args.hpp"
 #include "cli/commands.hpp"
 #include "cli/fileio.hpp"
+#include "cli/output.hpp"
 #include "cli/progress.hpp"
 #include "cli/session.hpp"
 
 #include <spdlog/spdlog.h>
 
+#include <chrono>
 #include <format>
 #include <memory>
 
@@ -35,7 +37,7 @@ nlohmann::json fileTimeJson(const std::optional<uint64_t> &fileTime) {
 }
 
 nlohmann::json attributesJson(const xbdm::FileAttributes &a) {
-  return {{"size", a.size},
+  return {{"size", a.sizeKnown ? nlohmann::json(a.size) : nlohmann::json()},
           {"directory", a.isDirectory},
           {"read_only", a.isReadOnly},
           {"hidden", a.isHidden},
@@ -81,8 +83,9 @@ Outcome<void> runList(Context &context, const std::string &directory) {
       auto entry = attributesJson(e);
       entry["name"] = e.name;
       entries.push_back(std::move(entry));
-      text += std::format("{} {:>14} {:19} {}\n", e.isDirectory ? 'd' : '-', e.isDirectory ? 0 : e.size,
-                          fileTimeText(e.changedFileTime), e.name);
+      const std::string size = e.isDirectory ? "0" : e.sizeKnown ? std::to_string(e.size) : "?";
+      text += std::format("{} {:>14} {:19} {}\n", e.isDirectory ? 'd' : '-', size, fileTimeText(e.changedFileTime),
+                          terminalText(e.name));
     }
     if (listing->skipped > 0) spdlog::warn("{} entries of the listing could not be read", listing->skipped);
     context.output.result({{"path", *path}, {"entries", entries}, {"skipped", listing->skipped}}, text);
@@ -98,8 +101,9 @@ Outcome<void> runStat(Context &context, const std::string &target) {
     if (!a) return fromError(a.error());
     auto json = attributesJson(*a);
     json["path"] = *path;
-    context.output.result(json, std::format("{}\n  type    : {}\n  size    : {} bytes\n  created : {}\n  changed : {}\n",
-                                            *path, a->isDirectory ? "folder" : "file", a->size,
+    const std::string size = a->sizeKnown ? std::to_string(a->size) + " bytes" : std::string("unknown");
+    context.output.result(json, std::format("{}\n  type    : {}\n  size    : {}\n  created : {}\n  changed : {}\n",
+                                            *path, a->isDirectory ? "folder" : "file", size,
                                             fileTimeText(a->createdFileTime), fileTimeText(a->changedFileTime)));
     return {};
   });
@@ -109,10 +113,20 @@ Outcome<void> runDrives(Context &context) {
   return withXbdm(context, "", [&](xbdm::XbdmClient &client, const net::Endpoint &) -> Outcome<void> {
     auto drives = client.drives();
     if (!drives) return fromError(drives.error());
+    // Each drivefreespace may take up to the command timeout; past this budget the
+    // remaining drives are listed without sizes.
+    const auto budgetEnd = std::chrono::steady_clock::now() + client.options().commandTimeout;
+    size_t unsized = 0;
     nlohmann::json list = nlohmann::json::array();
     std::string text;
     for (const auto &name : *drives) {
       nlohmann::json drive = {{"name", name}};
+      if (client.options().commandTimeout.count() > 0 && std::chrono::steady_clock::now() >= budgetEnd) {
+        ++unsized;
+        text += std::format("{:<10} (no size: not asked, the console answered too slowly)\n", name + ":");
+        list.push_back(std::move(drive));
+        continue;
+      }
       auto space = client.driveSpace(name);
       if (space) {
         drive["total_bytes"] = space->totalBytes;
@@ -125,6 +139,7 @@ Outcome<void> runDrives(Context &context) {
       }
       list.push_back(std::move(drive));
     }
+    if (unsized > 0) spdlog::warn("{} drives listed without their size: the console answered too slowly", unsized);
     context.output.result({{"drives", list}}, text);
     return {};
   });
@@ -198,7 +213,7 @@ Outcome<void> runModules(Context &context) {
                       {"size", m.size},
                       {"checksum", m.checksum ? nlohmann::json(std::format("{:08X}", *m.checksum)) : nlohmann::json()},
                       {"timestamp", m.timestamp ? nlohmann::json(*m.timestamp) : nlohmann::json()}});
-      text += std::format("{:08X} {:>10} {}\n", m.base, m.size, m.name);
+      text += std::format("{:08X} {:>10} {}\n", m.base, m.size, terminalText(m.name));
     }
     context.output.result({{"modules", list}}, text);
     return {};
@@ -228,8 +243,9 @@ Outcome<void> runRaw(Context &context, const std::string &line) {
                   [&](xbdm::XbdmClient &client, const net::Endpoint &) -> Outcome<void> {
                     auto answer = client.rawCommand(line);
                     if (!answer) return fromError(answer.error());
-                    std::string text = std::format("{}- {}\n", answer->status.code, answer->status.text);
-                    for (const auto &l : answer->body) text += l + "\n";
+                    std::string text =
+                        std::format("{}- {}\n", answer->status.code, terminalText(answer->status.text));
+                    for (const auto &l : answer->body) text += terminalText(l) + "\n";
                     if (answer->status.code == xbdm::status::kMultiline) text += ".\n";
                     context.output.result({{"command", line},
                                            {"status", answer->status.code},
@@ -310,15 +326,20 @@ Outcome<void> xbdmInfo(Context &context) {
                            {"running_title", info->runningTitle ? nlohmann::json(info->runningTitle->name) : nlohmann::json()},
                            {"exec_state", info->execState ? nlohmann::json(info->execState->text) : nlohmann::json()},
                            {"title_address", info->titleAddress ? nlohmann::json(info->titleAddress->text) : nlohmann::json()}};
-    auto shown = [](const std::optional<std::string> &value) { return value ? *value : std::string("(not answered)"); };
+    auto shown = [](const std::optional<std::string> &value) {
+      return value ? terminalText(*value) : std::string("(not answered)");
+    };
     std::string text;
     text += "================ XBDM CONSOLE INFO ================\n";
     text += std::format("  Debug Name      : {}\n", shown(info->debugName));
     text += std::format("  Console Type    : {}\n", shown(info->consoleType));
     text += std::format("  Console ID      : {}\n", shown(info->consoleId));
-    text += std::format("  Running Title   : {}\n", info->runningTitle ? info->runningTitle->name : "(not answered)");
-    text += std::format("  Execution State : {}\n", info->execState ? info->execState->text : "(not answered)");
-    text += std::format("  Title Address   : {}\n", info->titleAddress ? info->titleAddress->text : "(not answered)");
+    text += std::format("  Running Title   : {}\n",
+                        shown(info->runningTitle ? std::optional<std::string>(info->runningTitle->name) : std::nullopt));
+    text += std::format("  Execution State : {}\n",
+                        shown(info->execState ? std::optional<std::string>(info->execState->text) : std::nullopt));
+    text += std::format("  Title Address   : {}\n",
+                        shown(info->titleAddress ? std::optional<std::string>(info->titleAddress->text) : std::nullopt));
     text += "===================================================\n";
     context.output.result(json, text);
     return {};

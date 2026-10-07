@@ -32,4 +32,8 @@ private:
 // 16 bytes per line: offset, hex bytes, printable ASCII.
 std::string hexDump(std::span<const uint8_t> bytes, uint64_t baseOffset = 0);
 
+// Text a console sent, for the terminal: control characters, DEL and bytes above
+// 0x7E become \xNN, so the text cannot carry escape sequences.
+std::string terminalText(std::string_view text);
+
 } // namespace updclient::cli

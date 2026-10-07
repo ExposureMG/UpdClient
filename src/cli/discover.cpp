@@ -1,4 +1,5 @@
 #include "cli/commands.hpp"
+#include "cli/output.hpp"
 
 #include <spdlog/spdlog.h>
 
@@ -50,8 +51,8 @@ Outcome<void> runDiscover(Context &context, const std::string &protocol) {
                             {"info", device.info},
                             {"last_seen", isoTime(device.lastSeen)}};
     devices.push_back(std::move(entry));
-    text += std::format("{}  {}", device.address, device.protocol);
-    for (const auto &[key, value] : device.info) text += std::format("  {}={}", key, value);
+    text += std::format("{}  {}", terminalText(device.address), device.protocol);
+    for (const auto &[key, value] : device.info) text += std::format("  {}={}", terminalText(key), terminalText(value));
     text += "\n";
   }
 

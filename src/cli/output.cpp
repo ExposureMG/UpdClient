@@ -37,6 +37,17 @@ void Output::error(std::string_view code, std::string_view message, int sysError
   writeDocument({{"error", std::move(error)}});
 }
 
+std::string terminalText(std::string_view text) {
+  std::string out;
+  out.reserve(text.size());
+  for (char c : text) {
+    const auto u = static_cast<unsigned char>(c);
+    if (u < 0x20 || u > 0x7E) out += std::format("\\x{:02x}", u);
+    else out += c;
+  }
+  return out;
+}
+
 std::string hexDump(std::span<const uint8_t> bytes, uint64_t baseOffset) {
   constexpr size_t kPerLine = 16;
   std::string out;

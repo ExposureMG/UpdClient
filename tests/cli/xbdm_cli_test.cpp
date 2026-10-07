@@ -118,6 +118,28 @@ TEST(XbdmCli, Info) {
   cli.rig.checkCleanTraffic();
 }
 
+TEST(XbdmCli, ConsoleTextCannotReachTheTerminalAsEscapeSequences) {
+  CliRig cli;
+  auto info = cli.rig.mock.info();
+  info.debugName = "\x1b]0;title\x07\x1b[2Jname";
+  info.consoleType = "dev\x7fkit\xe9";
+  cli.rig.mock.setInfo(info);
+  auto text = cli.run({"info"});
+  CHECK_MSG(text.exit == 0, describe(text));
+  CHECK(!contains(text.out, "\x1b"));
+  CHECK(!contains(text.out, "\x07"));
+  CHECK(!contains(text.out, "\x7f"));
+  CHECK_MSG(contains(text.out, "\\x1b]0;title\\x07\\x1b[2Jname"), describe(text));
+  CHECK_MSG(contains(text.out, "dev\\x7fkit\\xe9"), describe(text));
+  auto raw = cli.run({"--yes", "xbdm", "raw", "dbgname"});
+  CHECK_MSG(raw.exit == 0, describe(raw));
+  CHECK(!contains(raw.out, "\x1b"));
+  CHECK_MSG(contains(raw.out, "200- \\x1b]0;title"), describe(raw));
+  // JSON carries the text as it is, escaped by JSON.
+  auto json = cli.run({"--json", "info"});
+  CHECK_MSG(contains(json.out, "\\u001b]0;title\\u0007"), describe(json));
+}
+
 TEST(XbdmCli, FileGetSendAndMkdir) {
   CliRig cli;
   ut::TempDir dir;
