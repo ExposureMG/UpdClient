@@ -109,13 +109,18 @@ TcpTransport::TcpTransport(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) 
 TcpTransport::~TcpTransport() = default;
 
 Result<TransportPtr> TcpTransport::connect(const Endpoint &endpoint) {
-  return connect(endpoint.host, endpoint.port, endpoint.timeout);
+  return connect(endpoint, std::stop_token());
 }
 
-Result<TransportPtr> TcpTransport::connect(std::string_view host, uint16_t port,
-                                           std::chrono::milliseconds timeout) {
+Result<TransportPtr> TcpTransport::connect(const Endpoint &endpoint, std::stop_token stop) {
+  const std::string_view host = endpoint.host;
+  const uint16_t port = endpoint.port;
+  const std::chrono::milliseconds timeout = endpoint.timeout;
   if (port == 0) {
     return fail(ErrorCode::InvalidArgument, "tcp endpoint '" + std::string(host) + "' has no port");
+  }
+  if (stop.stop_requested()) {
+    return fail(ErrorCode::Cancelled, "connect to " + std::string(host) + " cancelled");
   }
 
   auto runtime = platform::RuntimeGuard::acquire();
@@ -132,32 +137,58 @@ Result<TransportPtr> TcpTransport::connect(std::string_view host, uint16_t port,
   impl->timeout = std::max(timeout, std::chrono::milliseconds(0));
   Error lastFailure = makeError(ErrorCode::ConnectFailed, "no address to connect to");
 
-  for (const auto &address : *addresses) {
-    auto socket = platform::createSocket(address.storage.ss_family, SOCK_STREAM);
-    if (!socket) {
-      lastFailure = socket.error();
-      continue;
+  {
+    // The callback only signals the wake-up pipe; it is gone before the transport is
+    // handed out, so a late stop request never reaches a connected transport.
+    const platform::WakeSignal &signal = impl->wake;
+    std::stop_callback onStop(stop, [&signal] { signal.signal(); });
+
+    for (const auto &address : *addresses) {
+      if (stop.stop_requested()) {
+        lastFailure = makeError(ErrorCode::Cancelled,
+                                "connect to " + std::string(host) + " cancelled");
+        break;
+      }
+      auto socket = platform::createSocket(address.storage.ss_family, SOCK_STREAM);
+      if (!socket) {
+        lastFailure = socket.error();
+        continue;
+      }
+      if (auto r = platform::connectWithTimeout(*socket, address, timeout, &impl->wake); !r) {
+        lastFailure = r.error();
+        if (lastFailure.code == ErrorCode::Cancelled) break;
+        continue;
+      }
+      if (auto r = platform::setBlocking(*socket, false); !r) {
+        lastFailure = r.error();
+        continue;
+      }
+      (void)platform::setNoDelay(*socket);
+      impl->socket = std::move(*socket);
+      impl->peer = platform::addressToString(address) + ":" + std::to_string(port);
+      break;
     }
-    if (auto r = platform::connectWithTimeout(*socket, address, timeout); !r) {
-      lastFailure = r.error();
-      continue;
-    }
-    if (auto r = platform::setBlocking(*socket, false); !r) {
-      lastFailure = r.error();
-      continue;
-    }
-    (void)platform::setNoDelay(*socket);
-    impl->socket = std::move(*socket);
-    impl->peer = platform::addressToString(address) + ":" + std::to_string(port);
-    break;
   }
 
   if (!impl->socket.valid()) {
     return unexpected<Error>(std::move(lastFailure));
   }
+  if (stop.stop_requested()) {
+    return fail(ErrorCode::Cancelled, "connect to " + impl->peer + " cancelled");
+  }
 
   spdlog::debug("tcp connected to {}", impl->peer);
   return TransportPtr(new TcpTransport(std::move(impl)));
+}
+
+Result<TransportPtr> TcpTransport::connect(std::string_view host, uint16_t port,
+                                           std::chrono::milliseconds timeout) {
+  Endpoint endpoint;
+  endpoint.scheme = "tcp";
+  endpoint.host = std::string(host);
+  endpoint.port = port;
+  endpoint.timeout = timeout;
+  return connect(endpoint, std::stop_token());
 }
 
 bool TcpTransport::isOpen() const noexcept {

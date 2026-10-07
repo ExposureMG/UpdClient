@@ -555,7 +555,7 @@ Result<uint16_t> localPort(const Socket &socket) {
 }
 
 Result<void> connectWithTimeout(const Socket &socket, const SocketAddress &address,
-                                std::chrono::milliseconds timeout) {
+                                std::chrono::milliseconds timeout, const WakeSignal *wake) {
   if (timeout.count() <= 0) timeout = std::chrono::milliseconds(-1);
 
   if (auto r = setBlocking(socket, false); !r) return r;
@@ -574,9 +574,13 @@ Result<void> connectWithTimeout(const Socket &socket, const SocketAddress &addre
   }
 
   if (inProgress) {
-    auto ready = waitSocket(socket.handle(), WaitFor::Writable, timeout);
+    auto ready = waitSocket(socket.handle(), WaitFor::Writable, timeout, wake);
     if (!ready) return unexpected<Error>(ready.error());
-    if (!*ready) {
+    if (*ready == WaitResult::Woken) {
+      return fail(ErrorCode::Cancelled, "connect to " + addressToString(address) + ":" +
+                                            std::to_string(addressPort(address)) + " cancelled");
+    }
+    if (*ready == WaitResult::TimedOut) {
       return fail(ErrorCode::Timeout, "connect to " + addressToString(address) + ":" +
                                           std::to_string(addressPort(address)) + " timed out after " +
                                           std::to_string(timeout.count()) + " ms");

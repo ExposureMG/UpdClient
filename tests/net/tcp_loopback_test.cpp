@@ -12,6 +12,8 @@
 #include <chrono>
 #include <memory>
 #include <mutex>
+#include <stop_token>
+#include <thread>
 
 #if !defined(_WIN32)
 #include <fcntl.h>
@@ -191,7 +193,43 @@ TEST(TcpTransport, ConnectTimeoutAgainstAFullBacklog) {
   CHECK(r.error().code == ErrorCode::Timeout || r.error().code == ErrorCode::ConnectFailed);
   CHECK(elapsed < 5s);
 }
+
+TEST(TcpTransport, AStopEndsAConnectStuckOnAFullBacklog) {
+  auto stalled = ut::StalledListener::start();
+  if (!stalled) SKIP("cannot set up a full accept queue here");
+
+  std::stop_source source;
+  std::thread stopper([&] {
+    std::this_thread::sleep_for(100ms);
+    source.request_stop();
+  });
+  const auto start = std::chrono::steady_clock::now();
+  const auto r = net::TcpTransport::connect(loopbackEndpoint(stalled->port(), 5000ms), source.get_token());
+  const auto elapsed = std::chrono::steady_clock::now() - start;
+  stopper.join();
+
+  if (r.has_value()) SKIP("the kernel still accepted the connection; cannot simulate a stuck connect");
+  CHECK(r.error().code == ErrorCode::Cancelled);
+  CHECK(elapsed < 1s);
+}
 #endif
+
+TEST(TcpTransport, AStoppedTokenFailsBeforeConnecting) {
+  auto server = startOrSkip([](ut::ServerConnection &, const std::atomic<bool> &) {});
+  std::stop_source source;
+  source.request_stop();
+  const auto r = net::TcpTransport::connect(loopbackEndpoint(server->port()), source.get_token());
+  CHECK_ERR(r, ErrorCode::Cancelled);
+}
+
+TEST(TcpTransport, ATokenThatIsNeverStoppedConnectsNormally) {
+  auto server = startOrSkip([](ut::ServerConnection &, const std::atomic<bool> &) {});
+  std::stop_source source;
+  const auto r = net::TcpTransport::connect(loopbackEndpoint(server->port()), source.get_token());
+  REQUIRE_OK(r);
+  source.request_stop(); // after the connect: must not disturb the transport
+  CHECK((*r)->isOpen());
+}
 
 TEST(TcpTransport, RejectsEndpointWithoutPort) {
   net::Endpoint e;

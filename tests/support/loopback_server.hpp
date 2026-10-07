@@ -16,6 +16,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #if defined(_WIN32)
 #include <winsock2.h>
@@ -25,6 +26,7 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <cerrno>
 #endif
@@ -222,5 +224,47 @@ inline uint16_t unusedLoopbackPort() {
   if (::getsockname(probe.get(), reinterpret_cast<sockaddr *>(&address), &length) != 0) return 0;
   return ntohs(address.sin_port);
 }
+
+#if !defined(_WIN32)
+// A listener whose accept queue is full, so a further connect() hangs (the kernel
+// drops the SYN). Linux behavior; start() returns null where it cannot be set up.
+// A test that connects must still SKIP if the connect succeeds anyway.
+class StalledListener {
+public:
+  static std::unique_ptr<StalledListener> start() {
+    auto self = std::unique_ptr<StalledListener>(new StalledListener());
+    self->listener_ = SocketHandle(::socket(AF_INET, SOCK_STREAM, 0));
+    if (!self->listener_.valid()) return nullptr;
+    sockaddr_in address = loopbackAddress(0);
+    if (::bind(self->listener_.get(), reinterpret_cast<sockaddr *>(&address), sizeof(address)) != 0) {
+      return nullptr;
+    }
+    if (::listen(self->listener_.get(), 0) != 0) return nullptr;
+    socklen_t length = sizeof(address);
+    if (::getsockname(self->listener_.get(), reinterpret_cast<sockaddr *>(&address), &length) != 0) {
+      return nullptr;
+    }
+    self->port_ = ntohs(address.sin_port);
+    for (int i = 0; i < 6; ++i) {
+      SocketHandle filler(::socket(AF_INET, SOCK_STREAM, 0));
+      if (!filler.valid()) break;
+      ::fcntl(filler.get(), F_SETFL, ::fcntl(filler.get(), F_GETFL, 0) | O_NONBLOCK);
+      sockaddr_in target = loopbackAddress(self->port_);
+      (void)::connect(filler.get(), reinterpret_cast<sockaddr *>(&target), sizeof(target));
+      self->fillers_.push_back(std::move(filler));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    return self;
+  }
+
+  uint16_t port() const noexcept { return port_; }
+
+private:
+  StalledListener() = default;
+  SocketHandle listener_;
+  std::vector<SocketHandle> fillers_;
+  uint16_t port_ = 0;
+};
+#endif
 
 } // namespace ut

@@ -140,9 +140,10 @@ Result<void> joinMulticast(const Socket &socket, const SocketAddress &group,
 Result<void> bindSocket(const Socket &socket, const SocketAddress &address);
 Result<uint16_t> localPort(const Socket &socket);
 
-// A non-positive timeout waits indefinitely. Fails with ErrorCode::Timeout.
+// A non-positive timeout waits indefinitely. Fails with ErrorCode::Timeout. A signalled
+// wake (which may be null) ends the wait at once with ErrorCode::Cancelled.
 Result<void> connectWithTimeout(const Socket &socket, const SocketAddress &address,
-                                std::chrono::milliseconds timeout);
+                                std::chrono::milliseconds timeout, const WakeSignal *wake = nullptr);
 // Zero polls without blocking; a negative timeout waits indefinitely. true if readable.
 Result<bool> waitReadable(const Socket &socket, std::chrono::milliseconds timeout);
 // As waitReadable, for either direction, and returns Woken as soon as wake (which
