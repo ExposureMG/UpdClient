@@ -29,11 +29,23 @@ void Output::result(const nlohmann::json &data, std::string_view text) {
   std::cout.flush();
 }
 
-void Output::error(std::string_view code, std::string_view message, int sysError) {
+void Output::error(std::string_view code, std::string_view message, int sysError, int consoleStatus) {
   if (!json_) return;
   nlohmann::json error = {{"code", std::string(code)}, {"message", std::string(message)}};
   if (sysError != 0) error["os_error"] = sysError;
+  if (consoleStatus != 0) error["console_status"] = consoleStatus;
   writeDocument({{"error", std::move(error)}});
+}
+
+std::string terminalText(std::string_view text) {
+  std::string out;
+  out.reserve(text.size());
+  for (char c : text) {
+    const auto u = static_cast<unsigned char>(c);
+    if (u < 0x20 || u > 0x7E) out += std::format("\\x{:02x}", u);
+    else out += c;
+  }
+  return out;
 }
 
 std::string hexDump(std::span<const uint8_t> bytes, uint64_t baseOffset) {

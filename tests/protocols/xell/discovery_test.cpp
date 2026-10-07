@@ -2,7 +2,7 @@
 #include "support/test_harness.hpp"
 #include "support/test_util.hpp"
 
-#include <updclient/protocols/xell/discovery.hpp>
+#include <protocols/xell/discovery.hpp>
 
 #include <map>
 #include <memory>

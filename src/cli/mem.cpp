@@ -2,6 +2,7 @@
 #include "cli/commands.hpp"
 #include "cli/fileio.hpp"
 #include "cli/session.hpp"
+#include "cli/xbdm.hpp"
 
 #include <format>
 #include <memory>
@@ -18,6 +19,7 @@ struct MemArgs {
 };
 
 Outcome<void> runPeek(Context &context, const MemArgs &args) {
+  if (context.targetsXbdm()) return xbdmPeek(context, static_cast<uint32_t>(args.address), args.length);
   return withUpdServer(context, "", [&](updserver::UpdServerClient &client, const net::Endpoint &) -> Outcome<void> {
     const auto address = static_cast<uint32_t>(args.address);
     auto data = client.peek(address, args.length);
@@ -43,6 +45,7 @@ Outcome<void> runHvPeek(Context &context, const MemArgs &args) {
 Outcome<void> runPoke(Context &context, const MemArgs &args) {
   const auto address = static_cast<uint32_t>(args.address);
   const auto value = static_cast<uint32_t>(args.value);
+  if (context.targetsXbdm()) return xbdmPoke(context, address, value);
   const std::string action = std::format("WRITE 0x{:08X} to physical memory at 0x{:08X}", value, address);
   return withUpdServer(context, action, [&](updserver::UpdServerClient &client, const net::Endpoint &) -> Outcome<void> {
     auto result = client.poke(address, value);
@@ -80,7 +83,7 @@ Outcome<void> runGet1bl(Context &context, const MemArgs &args) {
 } // namespace
 
 void registerMemCommands(CLI::App &app, Context &context) {
-  auto *mem = addGroup(app, "mem", "Memory peek/poke and hypervisor operations (UpdServer)");
+  auto *mem = addGroup(app, "mem", "Memory peek/poke and hypervisor operations (UpdServer; peek and poke also XBDM)");
 
   auto peekArgs = std::make_shared<MemArgs>();
   auto *peek = mem->add_subcommand("peek", "Peek physical memory");

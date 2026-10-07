@@ -1,8 +1,8 @@
-#include <updclient/protocols/xell/discovery.hpp>
+#include <protocols/xell/discovery.hpp>
 
-#include <updclient/net/http_lite.hpp>
-#include <updclient/net/transport_registry.hpp>
-#include <updclient/protocols/xell/client.hpp>
+#include <net/http_lite.hpp>
+#include <net/transport_registry.hpp>
+#include <protocols/xell/client.hpp>
 
 #include "net/deadline.hpp"
 

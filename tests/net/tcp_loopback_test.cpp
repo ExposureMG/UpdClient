@@ -2,11 +2,11 @@
 #include "support/test_harness.hpp"
 #include "support/test_util.hpp"
 
-#include <updclient/net/tcp_transport.hpp>
-#include <updclient/net/transport_registry.hpp>
-#include <updclient/protocols/updserver/client.hpp>
-#include <updclient/protocols/xell/client.hpp>
-#include <updclient/updclient.hpp>
+#include <net/tcp_transport.hpp>
+#include <net/transport_registry.hpp>
+#include <protocols/updserver/client.hpp>
+#include <protocols/xell/client.hpp>
+#include <updclient.hpp>
 
 #include <atomic>
 #include <chrono>

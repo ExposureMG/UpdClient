@@ -3,6 +3,7 @@
 #include "cli/fileio.hpp"
 #include "cli/progress.hpp"
 #include "cli/session.hpp"
+#include "cli/xbdm.hpp"
 
 #include <spdlog/spdlog.h>
 
@@ -19,6 +20,7 @@ struct FileArgs {
 };
 
 Outcome<void> runGet(Context &context, const FileArgs &args) {
+  if (context.targetsXbdm()) return xbdmGet(context, args.first, args.second);
   return withUpdServer(context, "", [&](updserver::UpdServerClient &client, const net::Endpoint &) -> Outcome<void> {
     spdlog::info("Downloading '{}' to '{}'...", args.first, args.second);
     Progress progress("Download");
@@ -32,6 +34,7 @@ Outcome<void> runGet(Context &context, const FileArgs &args) {
 }
 
 Outcome<void> runSend(Context &context, const FileArgs &args) {
+  if (context.targetsXbdm()) return xbdmSend(context, args.first, args.second);
   return withUpdServer(context, "", [&](updserver::UpdServerClient &client, const net::Endpoint &) -> Outcome<void> {
     spdlog::info("Uploading '{}' to '{}'...", args.first, args.second);
     Progress progress("Upload");
@@ -65,6 +68,7 @@ Outcome<void> runUnmount(Context &context, const FileArgs &args) {
 }
 
 Outcome<void> runMkdir(Context &context, const FileArgs &args) {
+  if (context.targetsXbdm()) return xbdmMkdir(context, args.first);
   return withUpdServer(context, "", [&](updserver::UpdServerClient &client, const net::Endpoint &) -> Outcome<void> {
     auto result = client.mkDir(args.first);
     if (!result) return fromError(result.error());
@@ -89,7 +93,7 @@ void addFileCommand(CLI::App *group, Context &context, const std::string &name, 
 } // namespace
 
 void registerFileCommands(CLI::App &app, Context &context) {
-  auto *file = addGroup(app, "file", "Console storage operations (UpdServer)");
+  auto *file = addGroup(app, "file", "Console storage operations (UpdServer; get, send and mkdir also XBDM)");
   addFileCommand(file, context, "get", "Download a file from the console", "remote", "Remote path on the console",
                  "local", "Local destination file path", runGet);
   addFileCommand(file, context, "send", "Upload a file to the console", "local", "Local source file path", "remote",

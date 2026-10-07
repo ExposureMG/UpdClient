@@ -265,7 +265,13 @@ several segments, or two commands in one segment, are each handled in order.
 received) of 10 s per response, 30 s for `screenshot` and for the status line after
 `sendfile` data; there is no total time limit, so a large `getfile` may take minutes
 as long as bytes keep arriving. All three are settings of the client, injectable by
-tests.
+tests. Short answers are also bounded as a whole, because a console that sends one
+byte just inside the idle timeout would otherwise hold a call for the idle timeout
+times the line limit: the greeting by its 5 s, the answer to `bye` by its own timeout,
+and every command's answer, the status after `sendfile` data included, by a command
+timeout; only file data (`getfile` and `sendfile` bodies) is exempt. The greeting, the
+answer to `bye` and the status after `sendfile` data are read with a line limit of 512
+bytes.
 
 ### 1.12 Several connections
 
@@ -356,7 +362,9 @@ which is Windows-only and out of scope.
 
 **Contract:** Discovery broadcasts type 3 on every IPv4 interface, collects replies
 for 1.5 s, retries twice, de-duplicates by address, then asks each console `dbgname`
-over TCP (its answer wins over the UDP name). Adding a console by name sends type 1
+over TCP (its answer wins over the UDP name). Anyone on the network can send replies,
+so the client keeps at most 256 addresses and gives all `dbgname` queries of one search
+10 s together; consoles not asked by then keep their UDP names. Adding a console by name sends type 1
 and accepts a reply whose name matches case-insensitively. When nothing answers, the
 user types an address; the app remembers consoles it has reached. No subnet scanning.
 The mock answers type 3 always, type 1 only for its own name, and can be told to stay
@@ -528,7 +536,8 @@ mapped to device paths starting with `\`, at most 42 entries, each browsable or 
 
 **Contract:** total = `totalbytes`, free = `freetocaller`, used = total - free (XC:192,
 ON consoles.ts:184). The client accepts 200 or 202. A drive whose `drivefreespace`
-fails is still listed, without sizes.
+fails is still listed, without sizes. `drivelist` names that repeat (compared
+case-insensitively) and names after the 64th are ignored.
 
 ### 3.3 Directory listing (`dirlist`)
 
@@ -557,8 +566,10 @@ fails is still listed, without sizes.
   **[≠]**. A drive root without the backslash (`HDD:`) is untested anywhere.
 
 **Contract:** the client always sends `dirlist` with exactly one trailing backslash,
-parses fields by name in any order, treats a missing size as 0 and missing times as
-"unknown", and ignores flags it does not know. Entries named `.` or `..` are dropped.
+parses fields by name in any order, treats a missing size as 0 (reported as unknown) and
+missing times as "unknown", and ignores flags it does not know. Entries named `.` or `..`
+are dropped; entries whose name the client could not send back (4.1: `:`, `*`, `?`, a
+control character, a byte above 0x7E, ...) are skipped and counted, like unreadable ones.
 
 ### 3.4 `getfileattributes`
 
@@ -571,7 +582,10 @@ file, 3.5) are **[none]**. XC uses it to test existence before uploading a folde
 
 **Contract:** the client parses 200 or 202 alike and treats any 4xx as "does not
 exist or not accessible". `FileSystem::stat()` uses it when available and falls back to
-listing the parent folder.
+listing the parent folder. The library does the same where it needs the answer: the
+replace step of an upload lists the parent when `getfileattributes` answers 407, and
+`downloadToFile` also when the answer has no `sizehi`/`sizelo`; a missing size is never
+taken as 0.
 
 ### 3.5 Download (`getfile`)
 
@@ -606,7 +620,11 @@ returns the connection to the idle state. Cancelling a download closes the conne
 (it is reopened for the next command) and discards the partial local file, which the
 app's sinks already do on a failed transfer. A `length` larger than the size `dirlist`
 reported, or larger than the sink allows, is refused by closing the connection before
-reading the body (5.2).
+reading the body (5.2). When no listing gave the size, the client asks `getfileattributes`
+first (3.4) and refuses a file of 4 GiB or more before sending `getfile`: the mock, as the
+worst case, announces such a size modulo 2^32, and the download would end early looking
+complete. A console that refuses `getfileattributes` with 407 is asked for the size by listing the
+parent folder (3.4); when neither gives one, the file is asked for without that bound.
 
 ### 3.6 Upload (`sendfile`)
 
@@ -638,9 +656,15 @@ reading the body (5.2).
 **Contract:** an upload goes to a temporary name in the target folder
 (`<name>.<random>.part`, a FATX-valid name of at most 42 characters), then is renamed
 to the final name after `200`. If the final name exists the client deletes it right
-before the rename (the app's Replace confirmation has already been given). A cancel or
+before the rename (the app's Replace confirmation has already been given). From that
+delete on, the temporary file may be the only copy of either version: if the rename
+fails, or the delete's answer is lost, the temporary file is kept, never queued for
+deletion, and its name is in the error. A cancel or
 a drop closes the connection; on the next connection the client deletes the temporary
-file, best effort. The client never sends more or fewer bytes than announced.
+file, best effort. That includes a connection that fails after the `sendfile` line was sent
+but before its 204 was read, because the console may already have created the file (the mock
+creates it before answering; question 32). The client never sends more or fewer bytes than
+announced.
 
 ### 3.7 `sendvfile`
 
@@ -803,6 +827,9 @@ in the details:
   reports the first unreadable address (XL:90-91), ME zero-fills the rest (MEc:607-610).
 - A block larger than what remains: ME throws (MEc:617-619); XLs reads it and keeps only
   what was asked (XLs:87-93) **[≠]**.
+- The end: every reader stops as soon as `length` bytes have arrived, whether or not that
+  block has bit 15 set, and reads no further header (XL:88, XLs:99, MEc:626). A console
+  that sent an empty last block after the data would leave it for the next command.
 - Sizes used successfully: up to 0xC000 per request in ME (MEc:126-128, "3/4th of the
   receive buffer"), 0x10000 in ME's dumper (ME `Commands/DumpMemoryCommand.cs:204-205`),
   0x8000 while running and 0x20000 while stopped in XL (XL:238). The console's maximum is
@@ -989,7 +1016,7 @@ their width.
 |---|---|---|
 | `getfile` length | 32-bit; file under 4 GiB | all references |
 | `sendfile` length | announced in hex; no maximum known | **[none]** |
-| `getmem` per request | ME uses up to 128 bytes | client choice |
+| `getmem` per request | ME uses up to 128 bytes | client choice: at most 0x400 |
 | `getmemex` per request | 0x8000 to 0x20000 used; block size up to 0x400 | **[1]**, maximum **[none]** |
 | `setmem` per line | 64 (ME) or 128 (XL) bytes | **[≠]** |
 | Command line | limited, value unknown | **[none]** |
@@ -1048,7 +1075,8 @@ a sparse memory map. It must:
 ### 5.2 Client
 
 1. **Framing.** Read lines to LF, strip one CR, cap a line at 64 KiB (longer is a
-   protocol error). Never interpret a byte stream as lines while a binary payload is
+   protocol error) and a 202 body at 16 MiB, each line counting at least 64 bytes, the
+   memory it costs once parsed. Never interpret a byte stream as lines while a binary payload is
    pending, and never leave payload bytes in the buffer for the next command.
 2. **One command at a time** per connection (1.10); a mutex or the per-mount worker
    guarantees it.
@@ -1138,6 +1166,23 @@ Each needs a real console (or an emulator that implements XBDM) to settle.
     target (ON's devkit `bye` problem)? Does it depend on the console?
 30. Does a type-1 lookup match names case-insensitively?
 31. Is the `getfile` length really little-endian?
+
+Added when the client first ran against the mock (docs/HARDWARE_TEST_PLAN.md, N1 to N8):
+
+32. Does the console create the `sendfile` target before it answers 204, so that a drop
+    right after the 204 leaves an empty file?
+33. Does every target implement `getfileattributes`? The client's `downloadToFile` sends it
+    before every `getfile`, and lists the parent folder instead after a 407 or an answer
+    without a size.
+34. Is `magicboot title=... directory="DRIVE:\"` accepted for a file in a drive root, or is
+    `title` alone needed there, as DevTool sends for `FLASH:`?
+35. Are the formats the client sends accepted everywhere: lower-case `0x` hex without padding,
+    `setmem` data as upper-case hex without quotes?
+36. Is `bye` always answered `200- bye` before the close?
+37. Is a connection over the limit refused instead of the greeting, or after it?
+38. Does a reboot drop every connection, or only the one that asked for it?
+39. Screenshot: the field order and separators of the geometry line, and how `framebuffersize`
+    relates to `pitch * height`.
 
 ## 7. Known defects in the references (do not copy)
 

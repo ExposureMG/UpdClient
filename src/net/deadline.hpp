@@ -4,7 +4,7 @@
 // steady_clock::now() overflows the clock's tick count, so every deadline is
 // computed here, with the wait capped at Endpoint::kMaxTimeout.
 
-#include <updclient/net/endpoint.hpp>
+#include <net/endpoint.hpp>
 
 #include <algorithm>
 #include <chrono>

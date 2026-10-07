@@ -13,6 +13,7 @@ option(UPDCLIENT_BUILD_TESTS "Build the test suite" ${UPDCLIENT_IS_TOP_LEVEL})
 option(UPDCLIENT_WARNINGS "Enable extra compiler warnings" ${UPDCLIENT_IS_TOP_LEVEL})
 option(UPDCLIENT_INSTALL "Generate install and export rules" ${UPDCLIENT_IS_TOP_LEVEL})
 option(UPDCLIENT_USE_STD_EXPECTED "Use std::expected instead of tl::expected (needs a C++23 standard library and CMAKE_CXX_STANDARD 23)" OFF)
+option(UPDCLIENT_USE_SYSTEM_DEPS "Use installed dependencies found by find_package, fetching only the missing ones" OFF)
 
 if(UPDCLIENT_IS_TOP_LEVEL)
     if(NOT DEFINED CMAKE_CXX_STANDARD)
@@ -29,37 +30,48 @@ endif()
 include(GNUInstallDirs)
 include(FetchContent)
 
-FetchContent_Declare(
-    cli11
-    GIT_REPOSITORY https://github.com/CLIUtils/CLI11.git
-    GIT_TAG        v2.4.2
-)
+# Dependencies. Each one comes from the first of:
+#   1. a target that already exists (a parent project supplied it);
+#   2. with UPDCLIENT_USE_SYSTEM_DEPS, an installed package (find_package CONFIG, at least the
+#      version below, same major version);
+#   3. FetchContent: the pinned tag below, or FETCHCONTENT_SOURCE_DIR_<NAME> if set. The names
+#      cli11, spdlog, json and expected are fixed so those overrides keep working.
+# Only the library's dependencies (spdlog, and tl::expected unless UPDCLIENT_USE_STD_EXPECTED) are
+# looked at unless UPDCLIENT_BUILD_CLI is ON; CLI11 and nlohmann_json are not even declared then.
+macro(updclient_dependency name package version target)
+    if(TARGET ${target})
+        message(STATUS "UpdClient: ${name}: using the existing ${target} target")
+    else()
+        if(UPDCLIENT_USE_SYSTEM_DEPS)
+            find_package(${package} ${version} CONFIG QUIET)
+        endif()
+        if(TARGET ${target})
+            message(STATUS "UpdClient: ${name}: using installed ${package} ${${package}_VERSION} (${${package}_DIR})")
+        else()
+            string(TOUPPER ${name} updclient_dependency_upper)
+            if(FETCHCONTENT_FULLY_DISCONNECTED AND NOT FETCHCONTENT_SOURCE_DIR_${updclient_dependency_upper}
+               AND NOT EXISTS "${FETCHCONTENT_BASE_DIR}/${name}-src")
+                message(FATAL_ERROR "UpdClient: ${name} is needed, FETCHCONTENT_FULLY_DISCONNECTED is ON and "
+                    "nothing provides it. Pass -DFETCHCONTENT_SOURCE_DIR_${updclient_dependency_upper}=<source tree>, "
+                    "or install ${package} and configure with -DUPDCLIENT_USE_SYSTEM_DEPS=ON.")
+            endif()
+            if(FETCHCONTENT_SOURCE_DIR_${updclient_dependency_upper})
+                message(STATUS "UpdClient: ${name}: building from ${FETCHCONTENT_SOURCE_DIR_${updclient_dependency_upper}}")
+            else()
+                message(STATUS "UpdClient: ${name}: fetching with FetchContent")
+            endif()
+            FetchContent_MakeAvailable(${name})
+        endif()
+    endif()
+endmacro()
 
 FetchContent_Declare(
     spdlog
     GIT_REPOSITORY https://github.com/gabime/spdlog.git
     GIT_TAG        v1.14.1
 )
-
-FetchContent_Declare(
-    json
-    GIT_REPOSITORY https://github.com/nlohmann/json.git
-    GIT_TAG        v3.11.3
-)
-
-FetchContent_Declare(
-    expected
-    GIT_REPOSITORY https://github.com/TartanLlama/expected.git
-    GIT_TAG        v1.1.0
-)
-
-set(EXPECTED_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(EXPECTED_BUILD_PACKAGE OFF CACHE BOOL "" FORCE)
 set(SPDLOG_INSTALL ${UPDCLIENT_INSTALL} CACHE BOOL "")
-
-if(NOT TARGET spdlog)
-    FetchContent_MakeAvailable(spdlog)
-endif()
+updclient_dependency(spdlog spdlog 1.14 spdlog::spdlog)
 
 # spdlog 1.14's bundled fmt 10.2 does not compile its consteval format-string checks
 # under recent Clang releases; fall back to fmt's non-consteval path there.
@@ -92,16 +104,31 @@ int main() { std::expected<int, int> e(1); return *e - 1; }
     if(NOT UPDCLIENT_HAVE_STD_EXPECTED)
         message(FATAL_ERROR "UPDCLIENT_USE_STD_EXPECTED is ON but std::expected is not available with the current compiler and CMAKE_CXX_STANDARD")
     endif()
-elseif(NOT TARGET tl::expected)
-    FetchContent_MakeAvailable(expected)
+else()
+    FetchContent_Declare(
+        expected
+        GIT_REPOSITORY https://github.com/TartanLlama/expected.git
+        GIT_TAG        v1.1.0
+    )
+    set(EXPECTED_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(EXPECTED_BUILD_PACKAGE OFF CACHE BOOL "" FORCE)
+    # tl-expected 1.1.0 still reports version 1.0.0.
+    updclient_dependency(expected tl-expected 1.0 tl::expected)
 endif()
+
 if(UPDCLIENT_BUILD_CLI)
-    if(NOT TARGET CLI11::CLI11)
-        FetchContent_MakeAvailable(cli11)
-    endif()
-    if(NOT TARGET nlohmann_json::nlohmann_json)
-        FetchContent_MakeAvailable(json)
-    endif()
+    FetchContent_Declare(
+        cli11
+        GIT_REPOSITORY https://github.com/CLIUtils/CLI11.git
+        GIT_TAG        v2.4.2
+    )
+    FetchContent_Declare(
+        json
+        GIT_REPOSITORY https://github.com/nlohmann/json.git
+        GIT_TAG        v3.11.3
+    )
+    updclient_dependency(cli11 CLI11 2.4 CLI11::CLI11)
+    updclient_dependency(json nlohmann_json 3.11 nlohmann_json::nlohmann_json)
 endif()
 
 function(updclient_apply_warnings target)
@@ -190,7 +217,7 @@ if(UPDCLIENT_INSTALL)
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
     )
-    install(DIRECTORY include/updclient DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
     if(UPDCLIENT_BUILD_CLI)
         install(TARGETS updclient RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
     endif()

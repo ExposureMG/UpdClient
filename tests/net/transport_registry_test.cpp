@@ -1,9 +1,9 @@
 #include "support/mock_transport.hpp"
 #include "support/test_harness.hpp"
 
-#include <updclient/net/tcp_transport.hpp>
-#include <updclient/net/transport_registry.hpp>
-#include <updclient/updclient.hpp>
+#include <net/tcp_transport.hpp>
+#include <net/transport_registry.hpp>
+#include <updclient.hpp>
 
 #include <algorithm>
 #include <atomic>

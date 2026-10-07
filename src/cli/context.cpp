@@ -62,8 +62,12 @@ unexpected<Failure> usageError(std::string message) {
 }
 
 unexpected<Failure> fromError(const Error &error) {
-  return unexpected<Failure>(
-      Failure{errorCodeName(error.code), error.message, error.sysError, exitCodeFor(error.code)});
+  Failure failure{errorCodeName(error.code), error.message, error.sysError, exitCodeFor(error.code)};
+  if (const auto status = xbdm::consoleStatusCode(error)) {
+    failure.sysError = 0;
+    failure.consoleStatus = *status;
+  }
+  return unexpected<Failure>(std::move(failure));
 }
 
 void Context::applyGlobals() {
@@ -71,7 +75,8 @@ void Context::applyGlobals() {
   spdlog::set_level(options.verbose ? spdlog::level::debug : spdlog::level::info);
 }
 
-Outcome<net::Endpoint> Context::explicitEndpoint(bool forXell) const {
+Outcome<net::Endpoint> Context::explicitEndpoint(Service service) const {
+  const bool forXell = service == Service::Xell;
   if (!options.target.empty() && !options.ip.empty()) {
     return usageError("--target and --ip are mutually exclusive");
   }
@@ -86,6 +91,7 @@ Outcome<net::Endpoint> Context::explicitEndpoint(bool forXell) const {
   auto parsed = net::Endpoint::parse(spec);
   if (!parsed) return usageError("invalid target '" + spec + "': " + parsed.error().message);
   net::Endpoint endpoint = std::move(*parsed);
+  if (service == Service::Xbdm && spec.find("://") == std::string::npos) endpoint.scheme = "xbdm";
 
   const std::optional<uint16_t> &selected = forXell ? options.xellPort : options.port;
   if (selected) {
@@ -95,7 +101,10 @@ Outcome<net::Endpoint> Context::explicitEndpoint(bool forXell) const {
     }
     endpoint.port = *selected;
   }
-  if (endpoint.port == 0 && lowered(endpoint.scheme) == "tcp") {
+  const std::string scheme = lowered(endpoint.scheme);
+  if (endpoint.port == 0 && service == Service::Xbdm && (scheme == "tcp" || scheme == "xbdm")) {
+    endpoint.port = xbdm::kXbdmPort;
+  } else if (endpoint.port == 0 && scheme == "tcp") {
     endpoint.port = forXell ? xell::kXellHttpPort : updserver::NANDSVR_PORT;
   }
   if (options.timeoutMs) endpoint.timeout = std::chrono::milliseconds(*options.timeoutMs);
@@ -104,8 +113,18 @@ Outcome<net::Endpoint> Context::explicitEndpoint(bool forXell) const {
   return endpoint;
 }
 
+bool Context::targetsXbdm() const {
+  if (options.target.empty()) return false;
+  auto parsed = net::Endpoint::parse(options.target);
+  return parsed && lowered(parsed->scheme) == "xbdm";
+}
+
 Outcome<net::Endpoint> Context::resolveUpdServerEndpoint() const {
-  if (hasExplicitTarget()) return explicitEndpoint(false);
+  if (targetsXbdm()) {
+    return usageError("this is an UpdServer command and the target is an XBDM console (xbdm://); see "
+                      "'updclient xbdm --help' for what XBDM supports");
+  }
+  if (hasExplicitTarget()) return explicitEndpoint(Service::UpdServer);
   if (options.xellPort) {
     return usageError("--xell-port only applies to xell commands; use --port for UpdServer");
   }
@@ -149,7 +168,38 @@ Outcome<net::Endpoint> Context::resolveXellEndpoint() const {
   if (!hasExplicitTarget()) {
     return usageError("xell commands need --target or --ip: XeLL does not announce itself, so it is never auto-discovered");
   }
-  return explicitEndpoint(true);
+  if (targetsXbdm()) return usageError("xell commands talk to XeLL's HTTP server, not to an xbdm:// target");
+  return explicitEndpoint(Service::Xell);
+}
+
+Outcome<net::Endpoint> Context::resolveXbdmEndpoint() const {
+  if (hasExplicitTarget()) return explicitEndpoint(Service::Xbdm);
+  if (options.xellPort) return usageError("--xell-port only applies to xell commands");
+
+  const auto timeout = std::chrono::milliseconds(options.discoveryTimeoutMs);
+  spdlog::info("No target specified; looking for an XBDM console (UDP port {}, up to {} ms)...", xbdm::kXbdmPort,
+               timeout.count());
+  xbdm::XbdmDiscovery discovery;
+  auto found = discovery.discover(timeout, true);
+  if (!found) {
+    return failWith(kExitDiscovery, "DiscoveryFailed",
+                    "XBDM discovery is unavailable: " + found.error().message + "; pass --target xbdm://<address>");
+  }
+  if (found->empty()) {
+    return failWith(kExitDiscovery, "NoDevices",
+                    "no XBDM console answered within " + std::to_string(timeout.count()) +
+                        " ms; pass --target xbdm://<address> (many networks block the broadcast)");
+  }
+  net::Endpoint endpoint;
+  endpoint.scheme = "xbdm";
+  endpoint.host = found->front().address;
+  endpoint.port = options.port.value_or(xbdm::kXbdmPort);
+  if (options.timeoutMs) endpoint.timeout = std::chrono::milliseconds(*options.timeoutMs);
+  const auto name = found->front().info.find("name");
+  spdlog::info("Using discovered console {} at {}", name != found->front().info.end() ? name->second : "",
+               endpoint.toString());
+  if (auto registered = checkSchemeRegistered(endpoint); !registered) return unexpected<Failure>(registered.error());
+  return endpoint;
 }
 
 Outcome<void> Context::requireConfirmationPossible() const {
@@ -177,7 +227,7 @@ void Context::finish(const Outcome<void> &outcome) {
   const Failure &failure = outcome.error();
   spdlog::error("{}: {}{}", failure.code, failure.message,
                 failure.sysError != 0 ? " (os error " + std::to_string(failure.sysError) + ")" : "");
-  output.error(failure.code, failure.message, failure.sysError);
+  output.error(failure.code, failure.message, failure.sysError, failure.consoleStatus);
   exitCode = failure.exitCode;
 }
 

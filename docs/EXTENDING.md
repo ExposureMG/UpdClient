@@ -4,16 +4,16 @@ Three things vary independently, and each has its own extension point:
 
 | To add | Implement | Registered with | Files |
 | --- | --- | --- | --- |
-| A transport (serial, USB, TLS, ...) | `net::ITransport` | `net::TransportRegistry`, by URI scheme | `include/updclient/net/<name>_transport.hpp`, `src/net/<name>_transport.cpp` |
-| A protocol client | a class that takes a `net::TransportPtr` | nothing: callers construct it | `include/updclient/protocols/<name>/client.hpp`, `src/protocols/<name>/client.cpp` |
-| A discovery provider | `discovery::IDiscoveryProvider` | `discovery::DiscoveryRegistry`, by name | `include/updclient/protocols/<name>/discovery.hpp`, `src/protocols/<name>/discovery.cpp` |
+| A transport (serial, USB, TLS, ...) | `net::ITransport` | `net::TransportRegistry`, by URI scheme | `include/net/<name>_transport.hpp`, `src/net/<name>_transport.cpp` |
+| A protocol client | a class that takes a `net::TransportPtr` | nothing: callers construct it | `include/protocols/<name>/client.hpp`, `src/protocols/<name>/client.cpp` |
+| A discovery provider | `discovery::IDiscoveryProvider` | `discovery::DiscoveryRegistry`, by name | `include/protocols/<name>/discovery.hpp`, `src/protocols/<name>/discovery.cpp` |
 
 Sources under `src/` are globbed by CMake (`CONFIGURE_DEPENDS`), so a new `.cpp` needs no CMake edit; re-run
 CMake once if a build directory already exists. Tests under `tests/` are globbed the same way. A new
 dependency (a TLS or USB library) is the exception: link it in `CMakeLists.txt`.
 
 Read [ARCHITECTURE.md](ARCHITECTURE.md) first for the dependency rules. In short: headers under `include/`
-include only `<updclient/...>` and the standard library, never OS socket headers or spdlog; spdlog and
+include only `<...>` and the standard library, never OS socket headers or spdlog; spdlog and
 platform code live in `.cpp` files and private headers under `src/`; protocols never include each other.
 
 The examples below use made-up names (`serial`, `acme`). The transport, client and discovery examples
@@ -40,6 +40,11 @@ Contract:
 - `setTimeout(0)` disables the timeout. `Endpoint::timeout` is the initial value.
 - `close()` is idempotent and `noexcept`; after it, `isOpen()` is false and reads and writes fail with
   `ErrorCode::NotConnected`.
+- `close()` and `isOpen()` must be safe to call from another thread while a read or write is in
+  progress, and `close()` must wake that call, which then fails with `ErrorCode::Cancelled` rather
+  than waiting for its timeout or reporting end of stream. Never release a handle that a blocked call
+  may still be using. See [Cancellation](ARCHITECTURE.md#cancellation) for how `TcpTransport` does
+  it. In the serial example below, `SerialPort::close()` (not shown) would have to do the same.
 - Translate OS errors into `ErrorCode` values (`ConnectFailed` when opening, `Timeout`, `Disconnected`,
   `Io`). Put the OS error number in `Error::sysError`.
 - Read device-specific settings from `Endpoint::options`; reject bad ones with `InvalidArgument`.
@@ -53,15 +58,15 @@ Contract:
 
 ### Step 1: the public header
 
-`include/updclient/net/serial_transport.hpp`
+`include/net/serial_transport.hpp`
 
 ```cpp
 #pragma once
 
-#include <updclient/core/export.hpp>
-#include <updclient/net/endpoint.hpp>
-#include <updclient/net/transport.hpp>
-#include <updclient/net/transport_registry.hpp>
+#include <core/export.hpp>
+#include <net/endpoint.hpp>
+#include <net/transport.hpp>
+#include <net/transport_registry.hpp>
 
 #include <memory>
 #include <string>
@@ -110,7 +115,7 @@ Everything that differs per operating system goes behind a private header next t
 // Private to the library. Wraps the operating system's serial API (termios on
 // POSIX, CreateFile/SetCommState on Windows); nothing outside src/ includes it.
 
-#include <updclient/core/error.hpp>
+#include <core/error.hpp>
 
 #include <chrono>
 #include <cstddef>
@@ -157,7 +162,7 @@ given platform.
 `src/net/serial_transport.cpp`
 
 ```cpp
-#include <updclient/net/serial_transport.hpp>
+#include <net/serial_transport.hpp>
 
 #include "net/serial/serial_port.hpp"
 
@@ -245,10 +250,10 @@ auto client = updclient::updserver::UpdServerClient::connect(*endpoint);  // run
 Nothing in `UpdServerClient`, `XellClient` or `http_lite` changes: they only see an `ITransport`.
 
 To make the CLI accept `--target serial:///dev/ttyUSB0`, add one line after `registerBuiltins();` in
-`src/cli/app.cpp` (and `#include <updclient/net/serial_transport.hpp>`). The CLI rejects schemes that
+`src/cli/app.cpp` (and `#include <net/serial_transport.hpp>`). The CLI rejects schemes that
 are not registered, listing the ones that are. To make it a built-in for every user of the library, put
 the same call inside the `std::call_once` lambda in `src/updclient.cpp` and add the header to
-`include/updclient/updclient.hpp`.
+`include/updclient.hpp`.
 
 ### Step 5: tests
 
@@ -258,8 +263,8 @@ Real hardware is not needed to test argument handling and registration.
 ```cpp
 #include "support/test_harness.hpp"
 
-#include <updclient/net/serial_transport.hpp>
-#include <updclient/net/transport_registry.hpp>
+#include <net/serial_transport.hpp>
+#include <net/transport_registry.hpp>
 
 using namespace updclient;
 
@@ -285,15 +290,15 @@ mark such tests with `SKIP("no device")` when the device is absent.
 A protocol client takes its byte stream by injection and never constructs a socket. This one speaks an
 invented protocol: the line `STATUS\n` is answered by a big-endian 32-bit word.
 
-`include/updclient/protocols/acme/client.hpp`
+`include/protocols/acme/client.hpp`
 
 ```cpp
 #pragma once
 
-#include <updclient/core/error.hpp>
-#include <updclient/core/export.hpp>
-#include <updclient/net/endpoint.hpp>
-#include <updclient/net/transport.hpp>
+#include <core/error.hpp>
+#include <core/export.hpp>
+#include <net/endpoint.hpp>
+#include <net/transport.hpp>
 
 #include <cstdint>
 #include <string>
@@ -332,9 +337,9 @@ private:
 `src/protocols/acme/client.cpp`
 
 ```cpp
-#include <updclient/protocols/acme/client.hpp>
+#include <protocols/acme/client.hpp>
 
-#include <updclient/net/transport_registry.hpp>
+#include <net/transport_registry.hpp>
 
 #include <spdlog/spdlog.h>
 
@@ -400,7 +405,7 @@ Guidelines taken from `UpdServerClient`:
   connection usable.
 - State plainly in the header which commands the device does not acknowledge.
 - Keep wire constants and packed structures in `protocol.hpp`, with no I/O, as
-  `include/updclient/protocols/updserver/protocol.hpp` does, and `static_assert` their sizes.
+  `include/protocols/updserver/protocol.hpp` does, and `static_assert` their sizes.
 - Do not include another protocol's headers. Shared code belongs in `core/` or `net/`.
 - Write downloads to a temporary file and rename on success (see `UpdServerClient::getFile`).
 
@@ -409,8 +414,8 @@ instead of a transport and open one per request. `XellClient` does exactly this;
 `net/http_lite.hpp`:
 
 ```cpp
-#include <updclient/net/http_lite.hpp>
-#include <updclient/net/transport.hpp>
+#include <net/http_lite.hpp>
+#include <net/transport.hpp>
 
 #include <functional>
 #include <string>
@@ -434,7 +439,7 @@ Tests use `ut::MockScript` to script the device. `tests/protocols/acme/client_te
 #include "support/mock_transport.hpp"
 #include "support/test_harness.hpp"
 
-#include <updclient/protocols/acme/client.hpp>
+#include <protocols/acme/client.hpp>
 
 using namespace updclient;
 using ut::MockScript;
@@ -460,8 +465,8 @@ TEST(AcmeClient, ShortReplyClosesTheConnection) {
 }
 ```
 
-The umbrella header `include/updclient/updclient.hpp` lists every public header; adding the new ones is
-optional but keeps `#include <updclient/updclient.hpp>` sufficient for library users.
+The umbrella header `include/updclient.hpp` lists every public header; adding the new ones is
+optional but keeps `#include <updclient.hpp>` sufficient for library users.
 
 ## 3. Add a discovery provider
 
@@ -470,14 +475,14 @@ a constructor argument so tests can inject `ut::FakeDatagrams`. It must return a
 device when `stopAfterFirst` is set, and must report a failure (such as a bind error) as an `Error`, not
 as an empty successful result.
 
-`include/updclient/protocols/acme/discovery.hpp`
+`include/protocols/acme/discovery.hpp`
 
 ```cpp
 #pragma once
 
-#include <updclient/core/export.hpp>
-#include <updclient/discovery/discovery.hpp>
-#include <updclient/net/datagram.hpp>
+#include <core/export.hpp>
+#include <discovery/discovery.hpp>
+#include <net/datagram.hpp>
 
 #include <chrono>
 #include <cstdint>
@@ -513,10 +518,10 @@ UPDCLIENT_API void registerAcmeDiscovery(
 `src/protocols/acme/discovery.cpp`
 
 ```cpp
-#include <updclient/protocols/acme/discovery.hpp>
+#include <protocols/acme/discovery.hpp>
 
-#include <updclient/net/udp_socket.hpp>
-#include <updclient/protocols/acme/client.hpp>
+#include <net/udp_socket.hpp>
+#include <protocols/acme/client.hpp>
 
 #include <algorithm>
 #include <memory>
@@ -604,7 +609,10 @@ Register it with `acme::registerAcmeDiscovery()` next to `registerBuiltins()`, o
 `src/updclient.cpp` to make it built in. After that `updclient discover` lists its devices with no CLI
 change, because `discover` runs every registered provider and prints `protocol`, `address`, `info` and
 `last_seen`. Automatic target selection is different: `Context::resolveUpdServerEndpoint` in
-`src/cli/context.cpp` only uses devices whose `protocol` is `"updserver"`.
+`src/cli/context.cpp` only uses devices whose `protocol` is `"updserver"`. XBDM is the counterexample:
+its provider (`xbdm::XbdmDiscovery`) is not registered in the CLI, because UpdServer auto-discovery
+(`discoverAll` with `stopAfterFirst`) would then wait for it as well before giving up; `discover.cpp`
+and `Context::resolveXbdmEndpoint` run it directly.
 
 `tests/protocols/acme/discovery_test.cpp`
 
@@ -612,7 +620,7 @@ change, because `discover` runs every registered provider and prints `protocol`,
 #include "support/fake_datagram_socket.hpp"
 #include "support/test_harness.hpp"
 
-#include <updclient/protocols/acme/discovery.hpp>
+#include <protocols/acme/discovery.hpp>
 
 using namespace updclient;
 using namespace std::chrono_literals;
@@ -651,7 +659,7 @@ declares subcommands and binds callbacks to the shared `Context`.
 #include "cli/args.hpp"
 #include "cli/commands.hpp"
 
-#include <updclient/protocols/acme/client.hpp>
+#include <protocols/acme/client.hpp>
 
 #include <chrono>
 
@@ -710,13 +718,17 @@ Rules for CLI commands:
   error document and sets the exit code. Use `usageError` for bad arguments (exit 2), `fromError` for
   library errors (`InvalidArgument` gives exit 2, everything else 1) and `failWith` for a specific code.
 - Logs and progress go to stderr through spdlog (`cli/progress.hpp`).
-- A destructive command passes a non-empty action text to `withUpdServer`, which makes it ask for
-  confirmation (or require `--yes`). For a new protocol, add an equivalent `withAcme` helper in
-  `cli/session.hpp` that resolves the endpoint, calls `context.confirmDestructive`, connects and runs the
-  body.
-- `Context::explicitEndpoint(bool forXell)` is written for the two existing protocols. The example
-  above parses `--target` directly; with a third protocol in regular use, generalise it (for example
-  to take the default port) instead of adding another boolean.
+- A destructive command passes a non-empty action text to `withUpdServer` (or `withXbdm`), which makes
+  it ask for confirmation (or require `--yes`). For a new protocol, add an equivalent `withAcme` helper
+  in `cli/session.hpp` that resolves the endpoint, calls `context.confirmDestructive`, connects and runs
+  the body; `withXbdm` also shows how to add `--trace` and Ctrl-C cancellation (`cli/interrupt.hpp`).
+- `Context::explicitEndpoint(Service)` applies `--target`/`--ip`/`--port`/`--timeout-ms` and the
+  service's default port. The example above parses `--target` directly; for a protocol in regular use,
+  add a `Service` value and a `resolveAcmeEndpoint` next to `resolveXbdmEndpoint`.
+- If the new protocol does what an existing command does (as XBDM does for `file get`), dispatch inside
+  that command on the target's scheme (`Context::targetsXbdm()` in `file.cpp`, `mem.cpp`, `power.cpp`,
+  `info.cpp`) instead of adding a duplicate command, and let `resolveUpdServerEndpoint` refuse the
+  scheme so UpdServer-only commands fail with a usage error.
 - Document the command in the README command table.
 
 ## Known limitations
@@ -730,15 +742,28 @@ Rules for CLI commands:
   XeLL has no discovery; `xell::XellProbeProvider` probes endpoints you list and is not registered by
   default or used by the CLI.
 - `registerBuiltins()` registers only `tcp` and UpdServer discovery. Other transports and providers need
-  an explicit `registerXxx()` call.
+  an explicit `registerXxx()` call (XBDM: `xbdm::registerXbdm()` or `registerXbdmScheme()`).
+- XBDM has been run only against `tests/support/xbdm_mock_server`, never against a console or an
+  emulator; [HARDWARE_TEST_PLAN.md](HARDWARE_TEST_PLAN.md) lists what is still to be checked. The
+  client deviates from the contract of [XBDM_PROTOCOL.md](XBDM_PROTOCOL.md) in a few deliberate places:
+  it never reconnects on its own (spec 1.13 asks for one transparent retry; call `reconnect()`), it does
+  not retry after a 401 (1.12), `rename` may move between folders of one drive (3.10), discovery uses
+  one wildcard socket instead of one per interface (2.2), and `consoleInfo()` does not try `systeminfo`
+  or `dmversion` (3.1).
+- XBDM notifications (`notify`, section 3.18), breakpoints and execution control (`stop`, `go`,
+  `suspend`, `resume`) have no client API yet; `rawCommand` reaches the single-line ones. Screenshots are
+  returned still tiled. `getmem` is not used automatically when `getmemex` is missing; the CLI's
+  `mem peek` falls back on 407. `getMemory` sends `getmem` in requests of at most 0x400 bytes.
 - Timeouts apply to each connect and each read or write call, not to a whole transfer.
 - Many UpdServer commands are not acknowledged; success means "sent". The protocol has no framing, so
   a failed exchange closes the connection.
 - `http_lite` is HTTP/1.0 GET only: no chunked encoding, redirects, keep-alive or TLS. Responses with
   another `Transfer-Encoding` are rejected as `Unsupported`.
-- Clients and transports are not thread-safe; the two registries are.
-- `Context::explicitEndpoint` and `resolveUpdServerEndpoint` in the CLI know two protocols and treat
-  discovered devices as `tcp` endpoints.
+- Clients and transports are not thread-safe, except `ITransport::close()` and `isOpen()`; the two
+  registries are.
+- A TCP connect cannot be cancelled from another thread; it is bounded by `Endpoint::timeout`.
+- `Context::explicitEndpoint` knows three services; `resolveUpdServerEndpoint` treats discovered devices
+  as `tcp` endpoints.
 - The library has a C++ API only. A shared build exports `UPDCLIENT_API` symbols that use `std::string`
   and `std::map`, so the library and its users must be built with the same compiler and standard library.
 - Verified here: GCC and Clang on Linux, MinGW-w64 cross build (build only). macOS and MSVC are not
@@ -766,14 +791,14 @@ No public header changes: `Endpoint` already carries a string host.
 
 ### TLS
 
-- Add `include/updclient/net/tls_transport.hpp` and `src/net/tls_transport.cpp`: an `ITransport` that
+- Add `include/net/tls_transport.hpp` and `src/net/tls_transport.cpp`: an `ITransport` that
   wraps an inner `TransportPtr`, performs the handshake, and implements `readSome`/`writeSome` on the
   TLS session. Its connector, registered for `tls`, opens the inner transport through
   `TransportRegistry::instance().connect(...)` with the scheme rewritten to `tcp`, then handshakes.
   Settings such as certificate verification go in `Endpoint::options`.
 - `CMakeLists.txt`: add the TLS library (a new `FetchContent_Declare` or `find_package`) and link it
   `PRIVATE` to `updclient_lib`. Globbing does not cover dependencies.
-- `src/updclient.cpp` and `include/updclient/updclient.hpp` only if it becomes a built-in.
+- `src/updclient.cpp` and `include/updclient.hpp` only if it becomes a built-in.
 - Add `tests/net/tls_transport_test.cpp`.
 
 `UpdServerClient`, `XellClient` and `http_lite` work over it unchanged. XeLL's HTTPD does not speak TLS, so
@@ -781,7 +806,7 @@ this matters for new devices and protocols.
 
 ### Serial and USB
 
-- Add the files from section 1: `include/updclient/net/serial_transport.hpp`,
+- Add the files from section 1: `include/net/serial_transport.hpp`,
   `src/net/serial_transport.cpp`, `src/net/serial/serial_port.hpp`, and the per-OS implementations.
   No CMake change on POSIX or Windows (termios and the Win32 API come with the platform).
 - `src/cli/app.cpp`: one registration line so `--target serial://...` is accepted.
@@ -791,12 +816,22 @@ this matters for new devices and protocols.
 - UpdServer over a non-IP medium also needs a decision about the announcement/discovery path, which is
   UDP-only today.
 
+### XBDM after the hardware tests
+
+- `src/protocols/xbdm/client.cpp`: settle each `**[none]**` of `docs/XBDM_PROTOCOL.md` section 6 from the
+  reports of `docs/HARDWARE_TEST_PLAN.md`, and adjust `tests/support/xbdm_mock_server.cpp` and its tests
+  to the observed answers.
+- Notifications: add a `NotificationChannel` class to `include/protocols/xbdm/` that opens its
+  own connection, sends `notify` and parses the event lines of section 3.18; the mock already sends them
+  (`XbdmMockServer::notify`).
+- Screenshots: an untiler for format 8888 (spec 3.13) next to `screenshot()`.
+
 ### New console protocols
 
-- Add `include/updclient/protocols/<name>/{protocol,client,discovery}.hpp` and the matching
+- Add `include/protocols/<name>/{protocol,client,discovery}.hpp` and the matching
   `src/protocols/<name>/` sources, as in sections 2 and 3.
 - Add `src/cli/<name>.cpp`, one declaration in `src/cli/commands.hpp` and one call in
   `src/cli/app.cpp`, as in section 4. `src/cli/context.cpp` and `src/cli/session.cpp` need a resolver and
   a `with<Name>` helper if the protocol is used regularly.
 - Add tests under `tests/protocols/<name>/` using `MockScript` and `FakeDatagrams`.
-- Add the headers to `include/updclient/updclient.hpp` (optional).
+- Add the headers to `include/updclient.hpp` (optional).

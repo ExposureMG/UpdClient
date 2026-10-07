@@ -1,6 +1,6 @@
 #include "cli/fileio.hpp"
 
-#include <updclient/core/path.hpp>
+#include <core/path.hpp>
 
 #include <filesystem>
 #include <fstream>

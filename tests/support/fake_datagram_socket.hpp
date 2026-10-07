@@ -1,7 +1,7 @@
 #pragma once
 
-#include <updclient/core/error.hpp>
-#include <updclient/net/datagram.hpp>
+#include <core/error.hpp>
+#include <net/datagram.hpp>
 
 #include "support/test_util.hpp"
 

@@ -16,7 +16,6 @@
 #include <fcntl.h>
 #include <netinet/tcp.h>
 #include <poll.h>
-#include <sys/time.h>
 #include <unistd.h>
 #endif
 
@@ -83,12 +82,12 @@ constexpr int kMsgFlags = MSG_NOSIGNAL;
 constexpr int kMsgFlags = 0;
 #endif
 
-enum class WaitFor { Readable, Writable };
-
-Result<bool> waitSocket(SocketHandle handle, WaitFor what, std::chrono::milliseconds timeout) {
+Result<WaitResult> waitSocket(SocketHandle handle, WaitFor what, std::chrono::milliseconds timeout,
+                              const WakeSignal *wake) {
   using Clock = std::chrono::steady_clock;
   const bool infinite = timeout.count() < 0;
   const auto deadline = infinite ? Clock::time_point{} : deadlineAfter(timeout);
+  const bool watchWake = wake != nullptr && wake->valid();
 
   for (;;) {
     long long remainingMs = -1;
@@ -111,6 +110,7 @@ Result<bool> waitSocket(SocketHandle handle, WaitFor what, std::chrono::millisec
       FD_SET(handle, &writeSet);
       FD_SET(handle, &errorSet);
     }
+    if (watchWake) FD_SET(wake->waitHandle(), &readSet);
     timeval tv{};
     timeval *ptv = nullptr;
     if (!infinite) {
@@ -118,30 +118,48 @@ Result<bool> waitSocket(SocketHandle handle, WaitFor what, std::chrono::millisec
       tv.tv_usec = static_cast<long>((remainingMs % 1000) * 1000);
       ptv = &tv;
     }
-    int rc = ::select(0, what == WaitFor::Readable ? &readSet : nullptr,
-                      what == WaitFor::Writable ? &writeSet : nullptr,
+    const bool useRead = what == WaitFor::Readable || watchWake;
+    int rc = ::select(0, useRead ? &readSet : nullptr, what == WaitFor::Writable ? &writeSet : nullptr,
                       what == WaitFor::Writable ? &errorSet : nullptr, ptv);
     if (rc == SOCKET_ERROR) {
       int err = lastError();
       if (isInterrupted(err)) continue;
       return fail(ErrorCode::Io, "select failed: " + errorToString(err), err);
     }
-    return rc > 0;
+    if (watchWake && FD_ISSET(wake->waitHandle(), &readSet)) return WaitResult::Woken;
+    return rc > 0 ? WaitResult::Ready : WaitResult::TimedOut;
 #else
-    pollfd pfd{};
-    pfd.fd = handle;
-    pfd.events = what == WaitFor::Readable ? POLLIN : POLLOUT;
+    pollfd pfd[2]{};
+    pfd[0].fd = handle;
+    pfd[0].events = what == WaitFor::Readable ? POLLIN : POLLOUT;
+    pfd[1].fd = watchWake ? wake->waitHandle() : -1;
+    pfd[1].events = POLLIN;
     int timeoutArg = infinite ? -1 : static_cast<int>(std::min<long long>(remainingMs, INT_MAX));
-    int rc = ::poll(&pfd, 1, timeoutArg);
+    int rc = ::poll(pfd, watchWake ? 2 : 1, timeoutArg);
     if (rc < 0) {
       int err = lastError();
       if (isInterrupted(err)) continue;
       return fail(ErrorCode::Io, "poll failed: " + errorToString(err), err);
     }
-    return rc > 0;
+    if (watchWake && pfd[1].revents != 0) return WaitResult::Woken;
+    return rc > 0 ? WaitResult::Ready : WaitResult::TimedOut;
 #endif
   }
 }
+
+Result<bool> waitSocket(SocketHandle handle, WaitFor what, std::chrono::milliseconds timeout) {
+  auto r = waitSocket(handle, what, timeout, nullptr);
+  if (!r) return unexpected<Error>(r.error());
+  return *r == WaitResult::Ready;
+}
+
+#if !defined(UPDCLIENT_PLATFORM_WINSOCK) && !defined(__linux__)
+bool makePipeEnd(int fd) noexcept {
+  const int flags = ::fcntl(fd, F_GETFL, 0);
+  return flags >= 0 && ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 &&
+         ::fcntl(fd, F_SETFD, FD_CLOEXEC) == 0;
+}
+#endif
 
 } // namespace
 
@@ -215,6 +233,69 @@ void Socket::close() noexcept {
   handle_ = kInvalidSocket;
 }
 
+Result<WakeSignal> WakeSignal::create() {
+  WakeSignal wake;
+#if defined(UPDCLIENT_PLATFORM_WINSOCK)
+  auto socket = createSocket(AF_INET, SOCK_DGRAM);
+  if (!socket) return unexpected<Error>(socket.error());
+  SocketAddress address;
+  sockaddr_in loopback{};
+  loopback.sin_family = AF_INET;
+  loopback.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  std::memcpy(&address.storage, &loopback, sizeof(loopback));
+  address.length = static_cast<SockLen>(sizeof(loopback));
+  if (auto r = bindSocket(*socket, address); !r) return unexpected<Error>(r.error());
+  address.length = static_cast<SockLen>(sizeof(address.storage));
+  if (::getsockname(socket->handle(), address.data(), &address.length) != 0) {
+    int err = lastError();
+    return unexpected<Error>(socketError(ErrorCode::Io, "getsockname failed", err));
+  }
+  if (::connect(socket->handle(), address.data(), address.length) != 0) {
+    int err = lastError();
+    return unexpected<Error>(socketError(ErrorCode::Io, "connecting the wake-up socket failed", err));
+  }
+  if (auto r = setBlocking(*socket, false); !r) return unexpected<Error>(r.error());
+  wake.wait_ = std::move(*socket);
+#else
+  int fds[2] = {-1, -1};
+#if defined(__linux__)
+  const int rc = ::pipe2(fds, O_CLOEXEC | O_NONBLOCK);
+#else
+  const int rc = ::pipe(fds);
+#endif
+  if (rc != 0) {
+    int err = lastError();
+    return unexpected<Error>(socketError(ErrorCode::Io, "pipe() failed", err));
+  }
+  wake.wait_ = Socket(fds[0]);
+  wake.notify_ = Socket(fds[1]);
+#if !defined(__linux__)
+  if (!makePipeEnd(fds[0]) || !makePipeEnd(fds[1])) {
+    int err = lastError();
+    return unexpected<Error>(socketError(ErrorCode::Io, "configuring the wake-up pipe failed", err));
+  }
+#endif
+#endif
+  return wake;
+}
+
+void WakeSignal::signal() const noexcept {
+  const char byte = 1;
+#if defined(UPDCLIENT_PLATFORM_WINSOCK)
+  if (wait_.valid()) (void)::send(wait_.handle(), &byte, 1, 0);
+#else
+  if (notify_.valid()) {
+    while (::write(notify_.handle(), &byte, 1) < 0 && isInterrupted(lastError())) {
+    }
+  }
+#endif
+}
+
+void WakeSignal::close() noexcept {
+  notify_.close();
+  wait_.close();
+}
+
 int lastError() noexcept {
 #if defined(UPDCLIENT_PLATFORM_WINSOCK)
   return ::WSAGetLastError();
@@ -237,6 +318,14 @@ std::string errorToString(int sysError) {
   return std::string(buffer, length);
 #else
   return std::generic_category().message(sysError);
+#endif
+}
+
+bool wouldBlock(int sysError) noexcept {
+#if defined(UPDCLIENT_PLATFORM_WINSOCK)
+  return sysError == WSAEWOULDBLOCK;
+#else
+  return sysError == EAGAIN || sysError == EWOULDBLOCK;
 #endif
 }
 
@@ -363,27 +452,6 @@ Result<void> setBlocking(const Socket &socket, bool blocking) {
     return unexpected<Error>(socketError(ErrorCode::Io, "fcntl(F_SETFL) failed", err));
   }
 #endif
-  return {};
-}
-
-Result<void> setIoTimeouts(const Socket &socket, std::chrono::milliseconds timeout) {
-  const long long ms = std::max<long long>(0, timeout.count());
-#if defined(UPDCLIENT_PLATFORM_WINSOCK)
-  DWORD value = static_cast<DWORD>(std::min<long long>(ms, static_cast<long long>(MAXDWORD)));
-  const char *ptr = reinterpret_cast<const char *>(&value);
-  const int size = static_cast<int>(sizeof(value));
-#else
-  timeval value{};
-  value.tv_sec = static_cast<time_t>(ms / 1000);
-  value.tv_usec = static_cast<suseconds_t>((ms % 1000) * 1000);
-  const void *ptr = &value;
-  const socklen_t size = sizeof(value);
-#endif
-  if (::setsockopt(socket.handle(), SOL_SOCKET, SO_RCVTIMEO, ptr, size) != 0 ||
-      ::setsockopt(socket.handle(), SOL_SOCKET, SO_SNDTIMEO, ptr, size) != 0) {
-    int err = lastError();
-    return unexpected<Error>(socketError(ErrorCode::Io, "setting socket timeouts failed", err));
-  }
   return {};
 }
 
@@ -532,6 +600,20 @@ Result<void> connectWithTimeout(const Socket &socket, const SocketAddress &addre
 
 Result<bool> waitReadable(const Socket &socket, std::chrono::milliseconds timeout) {
   return waitSocket(socket.handle(), WaitFor::Readable, timeout);
+}
+
+Result<WaitResult> waitFor(const Socket &socket, WaitFor what, std::chrono::milliseconds timeout,
+                           const WakeSignal *wake) {
+  return waitSocket(socket.handle(), what, timeout, wake);
+}
+
+void shutdownBoth(const Socket &socket) noexcept {
+  if (!socket.valid()) return;
+#if defined(UPDCLIENT_PLATFORM_WINSOCK)
+  (void)::shutdown(socket.handle(), SD_BOTH);
+#else
+  (void)::shutdown(socket.handle(), SHUT_RDWR);
+#endif
 }
 
 Result<size_t> sendSome(const Socket &socket, std::span<const uint8_t> data) {

@@ -1,6 +1,6 @@
 #include "support/test_harness.hpp"
 
-#include <updclient/core/error.hpp>
+#include <core/error.hpp>
 
 #include <set>
 
@@ -49,14 +49,15 @@ TEST(Error, ErrorCodeNamesMatchEnumerators) {
   CHECK_EQ(std::string(errorCodeName(ErrorCode::Io)), std::string("Io"));
   CHECK_EQ(std::string(errorCodeName(ErrorCode::Protocol)), std::string("Protocol"));
   CHECK_EQ(std::string(errorCodeName(ErrorCode::LimitExceeded)), std::string("LimitExceeded"));
+  CHECK_EQ(std::string(errorCodeName(ErrorCode::Cancelled)), std::string("Cancelled"));
 }
 
 TEST(Error, ErrorCodeNamesAreDistinct) {
   std::set<std::string> names;
-  for (int i = 0; i <= static_cast<int>(ErrorCode::LimitExceeded); ++i) {
+  for (int i = 0; i <= static_cast<int>(ErrorCode::Cancelled); ++i) {
     names.insert(errorCodeName(static_cast<ErrorCode>(i)));
   }
-  CHECK_EQ(names.size(), static_cast<size_t>(ErrorCode::LimitExceeded) + 1);
+  CHECK_EQ(names.size(), static_cast<size_t>(ErrorCode::Cancelled) + 1);
 }
 
 TEST(Error, UnknownEnumValueFallsBackToUnknown) {

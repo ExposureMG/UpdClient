@@ -1,6 +1,6 @@
 #pragma once
 
-#include <updclient/core/error.hpp>
+#include <core/error.hpp>
 
 #include <CLI/CLI.hpp>
 

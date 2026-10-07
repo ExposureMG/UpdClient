@@ -1,4 +1,4 @@
-#include <updclient/updclient.hpp>
+#include <updclient.hpp>
 
 #include <memory>
 #include <mutex>

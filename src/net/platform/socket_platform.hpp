@@ -3,7 +3,7 @@
 // Private to the library: never include from anything under include/.
 // All Winsock / BSD socket differences are confined to this header and its .cpp.
 
-#include <updclient/core/error.hpp>
+#include <core/error.hpp>
 
 #include <chrono>
 #include <cstddef>
@@ -90,8 +90,33 @@ private:
   SocketHandle handle_ = kInvalidSocket;
 };
 
+// Wakes a waitFor() that another thread is blocked in. Once signalled it stays
+// signalled. POSIX: a non-blocking pipe. Winsock, whose select() takes only
+// sockets: a UDP socket connected to itself on 127.0.0.1.
+class WakeSignal {
+public:
+  static Result<WakeSignal> create();
+
+  WakeSignal() = default;
+
+  bool valid() const noexcept { return wait_.valid(); }
+  SocketHandle waitHandle() const noexcept { return wait_.handle(); }
+  // Safe to call from any thread, concurrently with waitFor(); never blocks.
+  void signal() const noexcept;
+  void close() noexcept;
+
+private:
+  Socket wait_;
+  Socket notify_;
+};
+
+enum class WaitFor { Readable, Writable };
+enum class WaitResult { Ready, TimedOut, Woken };
+
 int lastError() noexcept;
 std::string errorToString(int sysError);
+// The non-blocking operation would have had to wait.
+bool wouldBlock(int sysError) noexcept;
 // Maps an OS error to a library code; timeouts and lost connections get their
 // own codes, everything else gets fallback.
 ErrorCode classifyError(int sysError, ErrorCode fallback) noexcept;
@@ -105,8 +130,6 @@ std::string addressToString(const SocketAddress &address);
 uint16_t addressPort(const SocketAddress &address) noexcept;
 
 Result<void> setBlocking(const Socket &socket, bool blocking);
-// Zero disables the timeouts.
-Result<void> setIoTimeouts(const Socket &socket, std::chrono::milliseconds timeout);
 Result<void> setNoDelay(const Socket &socket);
 Result<void> setReuseAddress(const Socket &socket);
 Result<void> setBroadcast(const Socket &socket);
@@ -122,6 +145,13 @@ Result<void> connectWithTimeout(const Socket &socket, const SocketAddress &addre
                                 std::chrono::milliseconds timeout);
 // Zero polls without blocking; a negative timeout waits indefinitely. true if readable.
 Result<bool> waitReadable(const Socket &socket, std::chrono::milliseconds timeout);
+// As waitReadable, for either direction, and returns Woken as soon as wake (which
+// may be null) is signalled. Ready also covers error and hang-up conditions: the
+// next send or recv reports them.
+Result<WaitResult> waitFor(const Socket &socket, WaitFor what, std::chrono::milliseconds timeout,
+                           const WakeSignal *wake);
+// Disables both directions; a peer sees end of stream. Errors are ignored.
+void shutdownBoth(const Socket &socket) noexcept;
 
 // Return 0 only for an empty buffer (send) or orderly shutdown (recv).
 Result<size_t> sendSome(const Socket &socket, std::span<const uint8_t> data);

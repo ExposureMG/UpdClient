@@ -1,4 +1,4 @@
-#include <updclient/net/endpoint.hpp>
+#include <net/endpoint.hpp>
 
 #include <algorithm>
 #include <cctype>
