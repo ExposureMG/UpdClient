@@ -24,26 +24,26 @@ ClientOptions impatient() {
 XBDM_LINK_TEST(XbdmFaultIntegration, GreetingFaults) {
   Rig rig(link);
   rig.mock.inject(XbdmFault::silence().onGreeting().repeat(1));
-  auto silent = rig.open(impatient());
+  auto silent = rig.openFresh(impatient());
   CHECK_ERR(silent, ErrorCode::Timeout);
 
   rig.mock.inject(XbdmFault::statusLine("401- max number of connections exceeded").onGreeting());
-  auto full = rig.open(impatient());
+  auto full = rig.openFresh(impatient());
   CHECK_ERR(full, ErrorCode::LimitExceeded);
   if (!full) CHECK_EQ(consoleStatusCode(full.error()).value_or(0), 401);
 
   rig.mock.inject(XbdmFault::statusLine("200- hello").onGreeting());
-  CHECK_ERR(rig.open(impatient()), ErrorCode::Protocol);
+  CHECK_ERR(rig.openFresh(impatient()), ErrorCode::Protocol);
   rig.mock.inject(XbdmFault::statusLine("garbage").onGreeting());
-  CHECK_ERR(rig.open(impatient()), ErrorCode::Protocol);
+  CHECK_ERR(rig.openFresh(impatient()), ErrorCode::Protocol);
   rig.mock.inject(XbdmFault::dropAfterBytes(7).onGreeting());
-  CHECK_ERR(rig.open(impatient()), ErrorCode::Disconnected);
+  CHECK_ERR(rig.openFresh(impatient()), ErrorCode::Disconnected);
   rig.mock.inject(XbdmFault::statusLine("201- CONNECTED").onGreeting());
-  CHECK_OK(rig.open(impatient()));
+  CHECK_OK(rig.openFresh(impatient()));
   rig.mock.inject(XbdmFault::statusLine("201-connected").onGreeting());
-  CHECK_OK(rig.open(impatient()));
+  CHECK_OK(rig.openFresh(impatient()));
   rig.mock.inject(XbdmFault::trickleBytes().onGreeting());
-  auto trickled = rig.open(impatient());
+  auto trickled = rig.openFresh(impatient());
   REQUIRE_OK(trickled);
   CHECK_OK(trickled->debugName());
 }
@@ -76,7 +76,7 @@ XBDM_LINK_TEST(XbdmFaultIntegration, SilenceInsideAnswers) {
                        Case{"getmemex", head203 + 1}, Case{"getmemex", head203 + 2 + 10},
                        Case{"screenshot", head203 + 10}, Case{"drivelist", head202 + 5}}) {
     rig.mock.inject(XbdmFault::stall(c.after).on(c.command));
-    auto client = rig.client(impatient());
+    auto client = rig.fresh(impatient());
     updclient::Result<void> r;
     const std::string name = c.command;
     if (name == "dirlist") r = asVoid(client.list("HDD:\\"));
@@ -98,7 +98,7 @@ XBDM_LINK_TEST(XbdmFaultIntegration, CloseInsideAnswers) {
   for (const char *command : {"dbgname", "drivelist", "dirlist", "getmemex", "screenshot", "getmem", "modules"}) {
     for (size_t k : {size_t{0}, size_t{1}, size_t{4}, size_t{5}, size_t{16}}) {
       rig.mock.inject(XbdmFault::dropAfterBytes(k).on(command));
-      auto client = rig.client();
+      auto client = rig.fresh();
       const std::string name = command;
       updclient::Result<void> r;
       if (name == "dbgname") r = asVoid(client.debugName());
@@ -140,7 +140,7 @@ XBDM_LINK_TEST(XbdmFaultIntegration, UnknownStatusCodesDropTheConnection) {
   for (const char *line : {"299- odd", "500- internal error", "abc", "1xx- early", "300- redirect", "100- continue",
                            "20- short", "2000- long", "", "-", "999- nine"}) {
     rig.mock.inject(XbdmFault::statusLine(line).on("dbgname"));
-    auto client = rig.client();
+    auto client = rig.fresh();
     auto r = client.debugName();
     CHECK_MSG(!r && r.error().code == ErrorCode::Protocol,
               std::string(line) + ": " + (r ? "ok '" + *r + "'" : updclient::formatError(r.error())));
@@ -161,7 +161,7 @@ XBDM_LINK_TEST(XbdmFaultIntegration, UnexpectedSuccessCodesDropTheConnection) {
                        Case{"getmem", "203- binary response follows\r\n"}, Case{"mkdir", "204- send binary data\r\n"},
                        Case{"sendfile", "200- OK\r\n"}, Case{"screenshot", "200- OK\r\n"}}) {
     rig.mock.inject(XbdmFault::reply(c.reply).on(c.command));
-    auto client = rig.client();
+    auto client = rig.fresh();
     const std::string name = c.command;
     updclient::Result<void> r;
     if (name == "dbgname") r = asVoid(client.debugName());

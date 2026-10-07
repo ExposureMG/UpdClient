@@ -89,6 +89,18 @@ public:
     return std::move(*c);
   }
 
+  // As open() and client(), once the mock has noticed that every earlier connection
+  // closed: a test that opens one client after another would otherwise race the
+  // mock's bookkeeping into its connection limit.
+  Result<XbdmClient> openFresh(ClientOptions options = quickOptions()) {
+    (void)mock.waitForActiveConnections(0);
+    return open(options);
+  }
+  XbdmClient fresh(ClientOptions options = quickOptions()) {
+    (void)mock.waitForActiveConnections(0);
+    return client(options);
+  }
+
   // The client never pipelines and never sends an empty line (sections 1.3, 1.10).
   void checkCleanTraffic() const {
     for (const auto &record : mock.commands()) {
