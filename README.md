@@ -334,7 +334,11 @@ Things to know:
   limits connections and refuses with 401). `cancel()`, `FileReader::cancel()` and
   `FileWriter::cancel()` may be called from any thread. Console paths are `HDD:\dir\file`;
   `xbdm::toConsolePath` converts `/HDD/dir/file`. `ClientOptions::trace` receives every command and
-  text line, and the size of binary data, never its bytes.
+  text line, and the size of binary data, never its bytes. An upload that replaces a file deletes the
+  old one right before the rename; if the rename then fails, the data stays under the temporary name,
+  which the error names, and is never deleted. Every answer is bounded as a whole as well as between
+  bytes (the greeting by `greetingTimeout`, the answer to `bye` by `byeTimeout`, everything else but
+  file data by `commandTimeout`), so a console that trickles bytes cannot hold a call indefinitely.
 - The library logs through spdlog, which stays out of the public headers. A library user can set
   their own default logger; the CLI sends it to stderr.
 
@@ -368,7 +372,9 @@ XBDM" below speak XBDM, and UpdServer-only commands refuse the target (exit 2). 
 speaks XBDM; there a bare host (`--target 192.168.1.50` or `--ip`) means `xbdm://`, and without a target
 the first console found by XBDM discovery is used. Console paths are `HDD:\dir\file` or
 `/HDD/dir/file`. During an XBDM command Ctrl-C cancels the transfer in progress (exit 1); an interrupted
-upload's temporary file is deleted over a new connection, or named in a warning.
+upload's temporary file is deleted over a new connection, or named in a warning. Text the console sends
+(names, `info`, `xbdm raw` answers) is printed with control characters and bytes above 0x7E as `\xNN`;
+`--json` output carries it unchanged, JSON-escaped.
 
 | Command | Protocol | What it does | Confirms |
 | --- | --- | --- | --- |
@@ -393,8 +399,8 @@ upload's temporary file is deleted over a new connection, or named in a warning.
 | `xell flash-dump [-o file]` | XeLL | Download the NAND image (default `xell_flash.bin`) | |
 | `xell fuses` | XeLL | Fuse listing | |
 | `xell kv [-o file] [-r \| --raw-block]` | XeLL | Keyvault: decrypted, `--raw` (`/KVRAW`) or `--raw-block` (`/KVRAW2`) (default `kv.bin`) | |
-| `xbdm ls <folder>` / `xbdm stat <path>` | XBDM | List a folder; size, type and times of one path | |
-| `xbdm drives` | XBDM | Drives with total and free bytes | |
+| `xbdm ls <folder>` / `xbdm stat <path>` | XBDM | List a folder (entries whose name no command could use back are skipped and counted); size, type and times of one path | |
+| `xbdm drives` | XBDM | Drives with total and free bytes (at most 64 drives; drives still unasked after one command timeout, 60 s, are listed without sizes) | |
 | `xbdm rm [--dir] <path>` | XBDM | Delete a file, or an empty folder | yes |
 | `xbdm mv <from> <to>` | XBDM | Rename or move within one drive; the new name must not exist | |
 | `xbdm screenshot [-o file]` | XBDM | Save the raw, still tiled frame buffer (default `screenshot.raw`) and print its geometry | |

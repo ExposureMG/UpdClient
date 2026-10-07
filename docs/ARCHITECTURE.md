@@ -165,9 +165,15 @@ A protocol client takes its byte stream by injection and never constructs a sock
   connection; every other failure closes it, and the client never reconnects on its own. `FileReader`
   (`getfile`) and `FileWriter` (`sendfile`) stream transfers and own the connection while open; an
   upload goes to `<name>.<8 hex>.part` and is renamed after the console's 200, and temporary names left
-  by a drop are deleted by the next `reconnect()`. `protocol.hpp` holds the wire constants and parsers
-  (no I/O), `path.hpp` the console path rules. `ClientOptions` bounds every length the console sends and
-  carries the timeouts and an optional trace hook. `rawCommand` sends a line as typed, for diagnostics.
+  by a drop are deleted by the next `reconnect()`; once the old file of that name was deleted (or may
+  have been), the temporary file is never deleted, because it may hold the only copy. `protocol.hpp`
+  holds the wire constants and parsers (no I/O), `path.hpp` the console path rules. `ClientOptions`
+  bounds every length the console sends and carries the timeouts and an optional trace hook. Every
+  wait is idle-based and also bounded as a whole (greeting, `bye`, command; file data excepted), and a
+  202 body counts each line as at least 64 bytes against `maxBodyBytes`, because multi-line answers are
+  parsed line by line into only the fields a command keeps. `getfileattributes` falls back to the
+  parent's `dirlist` when the console does not know it (407), and for `downloadToFile` also when the
+  answer has no size. `rawCommand` sends a line as typed, for diagnostics.
 - The clients use `core/hex.hpp` and `net/` only.
 
 ## Discovery
@@ -184,8 +190,9 @@ A protocol client takes its byte stream by injection and never constructs a sock
   content. It is not registered by `registerBuiltins()`, because XeLL does not announce itself and the
   library never scans subnets on its own.
 - `xbdm::XbdmDiscovery`: broadcasts the XBDM name query (type 3) to UDP port 730 through an injectable
-  `DatagramSocketFactory`, de-duplicates replies by address and asks each console its `dbgname` over
-  TCP through an injectable connector. `findByName` (type 1) and `probeAddress` (one address) narrow
+  `DatagramSocketFactory`, de-duplicates replies by address (at most `maxDevices`, 256) and asks each
+  console its `dbgname` over TCP through an injectable connector, all queries together within
+  `nameQueryBudget` (10 s). `findByName` (type 1) and `probeAddress` (one address) narrow
   it; `xbdm::identify(endpoint)` connects by address alone. `registerXbdmDiscovery()` adds it; it is
   not in `registerBuiltins()`.
 
@@ -221,7 +228,7 @@ one-line edit in `src/updclient.cpp`.
   and `info`, and the `xbdm` group. `trace.{hpp,cpp}` writes `--trace` files from
   `xbdm::ClientOptions::trace`.
 - `output.{hpp,cpp}`: everything on stdout goes through `Output`, which enforces the one-JSON-document
-  contract.
+  contract; `terminalText` escapes console-supplied text for text mode.
 - `args.{hpp,cpp}`, `fileio.{hpp,cpp}`, `progress.hpp`, `version.hpp`: number parsing, atomic file writes,
   throttled progress on stderr, version string.
 - One file per command group: `discover.cpp`, `info.cpp`, `power.cpp`, `nand.cpp`, `mem.cpp`, `file.cpp`,

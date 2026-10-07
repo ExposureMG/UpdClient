@@ -753,7 +753,7 @@ Rules for CLI commands:
 - XBDM notifications (`notify`, section 3.18), breakpoints and execution control (`stop`, `go`,
   `suspend`, `resume`) have no client API yet; `rawCommand` reaches the single-line ones. Screenshots are
   returned still tiled. `getmem` is not used automatically when `getmemex` is missing; the CLI's
-  `mem peek` falls back on 407.
+  `mem peek` falls back on 407. `getMemory` sends `getmem` in requests of at most 0x400 bytes.
 - Timeouts apply to each connect and each read or write call, not to a whole transfer.
 - Many UpdServer commands are not acknowledged; success means "sent". The protocol has no framing, so
   a failed exchange closes the connection.

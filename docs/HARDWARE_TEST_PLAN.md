@@ -156,7 +156,8 @@ u file get /HDD/updclient-test/five.txt five-back.txt
 
 UpdClient assumes: 200 with the fields in the text, or 202 with them on body lines; `sizehi sizelo
 createhi createlo changehi changelo`, and the flag `directory` for a folder; any 4xx for a missing path.
-`file get` calls `getfileattributes` before every `getfile` and uses the size as an upper bound (N2).
+`file get` calls `getfileattributes` before every `getfile` and uses the size as an upper bound (N2);
+after a 407, or an answer without `sizehi`/`sizelo`, it lists the parent folder for the size instead.
 Report: status line and every field line for each of the four; which flags appear; whether `stat` shows
 5 bytes and `file get` succeeds.
 
@@ -214,6 +215,7 @@ SENT bytes of `0xA5`. With SENT equal to LENGTH it prints the console's answer; 
 connection at once.
 UpdClient assumes: nothing about replacing. It uploads to `<name>.<8 hex>.part`, deletes the final name
 if `getfileattributes` finds it, then renames; so this answer only decides whether that delete is needed.
+If the rename fails after that delete, the upload is left as the `.part` file and the error names it.
 A missing parent is refused before 204 (the mock uses 413).
 Report: the line after the `sendfile` command for both; the size `stat` shows afterwards (3 means
 replaced); whether `nofolder` was created.
@@ -495,7 +497,7 @@ UpdClient assumes: blocks of at most 0x7FFF bytes; a read ends once `length` byt
 whatever bit 15 says; bit 15 before that means the rest is unreadable; at most 0x20000 per request.
 Report: for each probe the block headers and whether anything followed the data; the largest length
 answered and the code of the first refusal; what the region-crossing read returned. If `getmemex`
-answers 407, `mem peek` falls back to `getmem`: report that too.
+answers 407, `mem peek` falls back to `getmem`, in requests of at most 0x400 bytes: report that too.
 
 ### Q25. `getmem` on unmapped memory, and bytes per line (Medium: reads memory)
 
@@ -603,7 +605,8 @@ Report: whether `early.bin` exists, and its size. Delete it.
 
 ### N2 (spec Q33). Does every target implement `getfileattributes`? (Low)
 
-Covered by Q1: report the answer. On a 4xx, `file get` still works, without the size bound.
+Covered by Q1: report the answer. On a 407, `file get` takes the size from the parent's listing and
+`file send` finds a file to replace there; on any other 4xx, `file get` works without the size bound.
 
 ### N3 (spec Q34). Launching a file in a drive root (Medium)
 
