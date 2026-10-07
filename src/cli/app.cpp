@@ -17,9 +17,9 @@ namespace updclient::cli {
 namespace {
 
 constexpr const char *kFooter =
-    "Targets: --target takes a URI such as tcp://192.168.1.5:49 or a bare IP; --ip and --port are\n"
-    "shortcuts for tcp targets. With --target xbdm://192.168.1.5 (port 730) the file, mem, power and\n"
-    "info commands speak XBDM, the Xbox debug monitor, instead of UpdServer. UpdServer and xbdm\n"
+    "Targets: --target takes a URI such as tcp://192.168.1.5:49, or a bare IP address or host name;\n"
+    "--ip and --port are shortcuts for tcp targets. With --target xbdm://192.168.1.5 (port 730) the\n"
+    "file, mem, power and info commands speak XBDM, the Xbox debug monitor, instead of UpdServer. UpdServer and xbdm\n"
     "commands auto-discover a console when no target is given; xell commands never do.\n"
     "Numbers: decimal (4096) or 0x-prefixed hex (0x1000).\n"
     "Output: results go to stdout, logs to stderr; --json prints exactly one JSON document.\n"
@@ -35,8 +35,8 @@ void initLogging() {
 void addGlobalOptions(CLI::App &app, Context &context) {
   GlobalOptions &options = context.options;
   app.add_option("-t,--target", options.target,
-                 "Target URI, e.g. tcp://192.168.1.5:49, or a bare IP (default: auto-discover for UpdServer)");
-  app.add_option("-i,--ip", options.ip, "Target IP address (shortcut for --target)");
+                 "Target URI, e.g. tcp://192.168.1.5:49, or a bare IP address or host name (default: auto-discover for UpdServer)");
+  app.add_option("-i,--ip", options.ip, "Target IP address or host name (shortcut for --target)");
   addNumber(&app, "-p,--port", options.port, "UpdServer TCP port, default 49");
   addNumber(&app, "--xell-port", options.xellPort, "XeLL HTTPD port for xell commands, default 80");
   addNumber(&app, "--timeout-ms", options.timeoutMs, "Connect and I/O timeout in milliseconds, 0 for none, default 5000");

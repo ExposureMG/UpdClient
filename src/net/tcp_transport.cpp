@@ -126,9 +126,6 @@ Result<TransportPtr> TcpTransport::connect(const Endpoint &endpoint, std::stop_t
   auto runtime = platform::RuntimeGuard::acquire();
   if (!runtime) return unexpected<Error>(runtime.error());
 
-  auto addresses = platform::resolve(host, port, SOCK_STREAM, false);
-  if (!addresses) return unexpected<Error>(addresses.error());
-
   auto wake = platform::WakeSignal::create();
   if (!wake) return unexpected<Error>(wake.error());
 
@@ -137,13 +134,18 @@ Result<TransportPtr> TcpTransport::connect(const Endpoint &endpoint, std::stop_t
   impl->timeout = std::max(timeout, std::chrono::milliseconds(0));
   Error lastFailure = makeError(ErrorCode::ConnectFailed, "no address to connect to");
 
+  std::vector<platform::SocketAddress> addresses;
   {
     // The callback only signals the wake-up pipe; it is gone before the transport is
     // handed out, so a late stop request never reaches a connected transport.
     const platform::WakeSignal &signal = impl->wake;
     std::stop_callback onStop(stop, [&signal] { signal.signal(); });
 
-    for (const auto &address : *addresses) {
+    auto resolved = platform::resolveBounded(host, port, SOCK_STREAM, timeout, &impl->wake);
+    if (!resolved) return unexpected<Error>(resolved.error());
+    addresses = std::move(*resolved);
+
+    for (const auto &address : addresses) {
       if (stop.stop_requested()) {
         lastFailure = makeError(ErrorCode::Cancelled,
                                 "connect to " + std::string(host) + " cancelled");

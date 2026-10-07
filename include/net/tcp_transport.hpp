@@ -13,8 +13,9 @@
 
 namespace updclient::net {
 
-// IPv4 numeric addresses today. The implementation resolves through
-// getaddrinfo, so IPv6 and hostnames are a small change inside the platform layer.
+// IPv4 only today: the host is an IPv4 address or a host name that resolves to one
+// (the lookup runs within Endpoint::timeout). The implementation resolves through
+// getaddrinfo, so IPv6 is a small change inside the platform layer.
 // close() from another thread shuts the socket down and wakes a blocked read or
 // write (see ITransport). No transport exists while connecting, so a connect is
 // cancelled through the stop_token overload instead; without a token it is bounded

@@ -123,9 +123,18 @@ ErrorCode classifyError(int sysError, ErrorCode fallback) noexcept;
 Error socketError(ErrorCode fallback, std::string_view context, int sysError);
 
 Result<Socket> createSocket(int family, int type);
-// Numeric hosts only. An empty host with passive set yields the wildcard address.
+// Numeric hosts only (see resolveBounded for names). An empty host with passive set yields the wildcard address.
 Result<std::vector<SocketAddress>> resolve(std::string_view host, uint16_t port, int type,
                                            bool passive, int family = kDefaultFamily);
+// For a client connect: numeric hosts are parsed in place; any other host name is looked
+// up (IPv4 only, like resolve) on a short-lived thread. The wait ends with ErrorCode::
+// Timeout after timeout (non-positive: no limit) or ErrorCode::Cancelled when wake (which
+// may be null) is signalled; the thread then finishes on its own and discards its result.
+// A name that does not exist is InvalidArgument; a resolver that fails or cannot be
+// reached is ConnectFailed.
+Result<std::vector<SocketAddress>> resolveBounded(std::string_view host, uint16_t port, int type,
+                                                  std::chrono::milliseconds timeout,
+                                                  const WakeSignal *wake);
 std::string addressToString(const SocketAddress &address);
 uint16_t addressPort(const SocketAddress &address) noexcept;
 

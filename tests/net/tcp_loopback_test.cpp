@@ -231,6 +231,41 @@ TEST(TcpTransport, ATokenThatIsNeverStoppedConnectsNormally) {
   CHECK((*r)->isOpen());
 }
 
+TEST(TcpTransport, ConnectsByHostName) {
+  auto server = startOrSkip([](ut::ServerConnection &, const std::atomic<bool> &) {});
+  net::Endpoint endpoint = loopbackEndpoint(server->port());
+  endpoint.host = "localhost";
+  const auto r = net::TcpTransport::connect(endpoint);
+  if (!r.has_value() && r.error().code != ErrorCode::Timeout) {
+    if (r.error().code == ErrorCode::InvalidArgument || r.error().code == ErrorCode::ConnectFailed) {
+      SKIP("'localhost' does not resolve to an IPv4 address here: " + r.error().message);
+    }
+  }
+  REQUIRE_OK(r);
+  CHECK((*r)->describe().find("127.0.0.1") != std::string::npos);
+}
+
+TEST(TcpTransport, UnknownHostNameFailsWithinTheTimeout) {
+  net::Endpoint endpoint = loopbackEndpoint(49, 2000ms);
+  endpoint.host = "no-such-host.invalid"; // RFC 6761: never resolves
+  const auto start = std::chrono::steady_clock::now();
+  const auto r = net::TcpTransport::connect(endpoint);
+  const auto elapsed = std::chrono::steady_clock::now() - start;
+  REQUIRE(!r.has_value());
+  // NXDOMAIN is InvalidArgument; a machine without a resolver reports its failure instead.
+  CHECK(r.error().code == ErrorCode::InvalidArgument || r.error().code == ErrorCode::ConnectFailed ||
+        r.error().code == ErrorCode::Timeout);
+  CHECK(elapsed < 4s);
+}
+
+TEST(TcpTransport, AStopEndsAHostNameLookup) {
+  net::Endpoint endpoint = loopbackEndpoint(49, 30000ms);
+  endpoint.host = "no-such-host.invalid";
+  std::stop_source source;
+  source.request_stop();
+  CHECK_ERR(net::TcpTransport::connect(endpoint, source.get_token()), ErrorCode::Cancelled);
+}
+
 TEST(TcpTransport, RejectsEndpointWithoutPort) {
   net::Endpoint e;
   e.scheme = "tcp";

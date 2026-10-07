@@ -70,6 +70,8 @@ TEST(UdpSocket, SendToNeedsABoundSocketAndAPort) {
   bindOrSkip(socket, loopbackOptions());
   CHECK_ERR(socket.sendTo(payload, "127.0.0.1", 0), ErrorCode::InvalidArgument);
   CHECK_ERR(socket.sendTo(payload, "not-an-address", 9), ErrorCode::InvalidArgument);
+  // Datagram addresses stay numeric even though TCP endpoints accept host names.
+  CHECK_ERR(socket.sendTo(payload, "localhost", 9), ErrorCode::InvalidArgument);
 }
 
 TEST(UdpSocket, BadBindOptionsAreInvalidArguments) {

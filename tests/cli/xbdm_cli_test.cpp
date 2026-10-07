@@ -118,6 +118,15 @@ TEST(XbdmCli, Info) {
   cli.rig.checkCleanTraffic();
 }
 
+TEST(XbdmCli, ATargetMayBeAHostName) {
+  CliRig cli;
+  const std::string localhost = "xbdm://localhost:" + std::to_string(cli.rig.port());
+  auto run = runCli({"--target", localhost, "--timeout-ms", "3000", "info"});
+  if (run.exit != 0 && contains(run.err, "cannot resolve")) SKIP("'localhost' does not resolve here");
+  CHECK_MSG(run.exit == 0, describe(run));
+  CHECK_MSG(contains(run.out, "MockDevkit"), describe(run));
+}
+
 TEST(XbdmCli, ConsoleTextCannotReachTheTerminalAsEscapeSequences) {
   CliRig cli;
   auto info = cli.rig.mock.info();

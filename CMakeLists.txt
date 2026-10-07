@@ -166,7 +166,10 @@ target_include_directories(updclient_lib
         ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
-target_link_libraries(updclient_lib PRIVATE spdlog::spdlog)
+# Host name lookups run on a short-lived thread (net/platform/socket_platform.cpp).
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
+target_link_libraries(updclient_lib PRIVATE spdlog::spdlog Threads::Threads)
 
 # Part of the library's ABI: consumers see the same definition as the library.
 if(UPDCLIENT_USE_STD_EXPECTED)

@@ -7,8 +7,11 @@
 #include <charconv>
 #include <climits>
 #include <cstring>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <system_error>
+#include <thread>
 #include <utility>
 
 #if !defined(UPDCLIENT_PLATFORM_WINSOCK)
@@ -365,18 +368,21 @@ Result<Socket> createSocket(int family, int type) {
   return socket;
 }
 
-Result<std::vector<SocketAddress>> resolve(std::string_view host, uint16_t port, int type,
-                                           bool passive, int family) {
+namespace {
+
+// One getaddrinfo call. numeric: the host must be an address, so nothing is looked up.
+Result<std::vector<SocketAddress>> lookup(const std::string &hostText, uint16_t port, int type,
+                                          bool passive, int family, bool numeric,
+                                          bool *notFound) {
   addrinfo hints{};
   hints.ai_family = family;
   hints.ai_socktype = type;
-  hints.ai_flags = AI_NUMERICHOST;
+  hints.ai_flags = numeric ? AI_NUMERICHOST : 0;
 #if defined(AI_NUMERICSERV)
   hints.ai_flags |= AI_NUMERICSERV;
 #endif
   if (passive) hints.ai_flags |= AI_PASSIVE;
 
-  std::string hostText(host);
   std::string service = std::to_string(port);
   addrinfo *list = nullptr;
   int rc = ::getaddrinfo(hostText.empty() ? nullptr : hostText.c_str(), service.c_str(), &hints,
@@ -387,10 +393,17 @@ Result<std::vector<SocketAddress>> resolve(std::string_view host, uint16_t port,
 #else
     std::string text = ::gai_strerror(rc);
 #endif
-    ErrorCode code = (rc == EAI_NONAME || rc == EAI_FAMILY || rc == EAI_SERVICE)
-                         ? ErrorCode::InvalidArgument
-                         : ErrorCode::Io;
-    return fail(code, "cannot resolve '" + hostText + "' (numeric IP address required): " + text);
+    if (notFound != nullptr) *notFound = rc == EAI_NONAME;
+    ErrorCode code;
+    if (rc == EAI_NONAME || rc == EAI_FAMILY || rc == EAI_SERVICE) {
+      code = ErrorCode::InvalidArgument;
+    } else if (!numeric && (rc == EAI_AGAIN || rc == EAI_FAIL)) {
+      code = ErrorCode::ConnectFailed;
+    } else {
+      code = ErrorCode::Io;
+    }
+    return fail(code, "cannot resolve '" + hostText + "'" +
+                          (numeric ? " (numeric IP address required)" : "") + ": " + text);
   }
 
   std::vector<SocketAddress> out;
@@ -409,6 +422,61 @@ Result<std::vector<SocketAddress>> resolve(std::string_view host, uint16_t port,
     return fail(ErrorCode::InvalidArgument, "no usable address for '" + hostText + "'");
   }
   return out;
+}
+
+// What the lookup thread and the waiting caller share. The thread owns a reference, so
+// it can finish after the caller gave up.
+struct LookupSlot {
+  std::mutex mutex;
+  std::optional<Result<std::vector<SocketAddress>>> result;
+  WakeSignal done;
+};
+
+} // namespace
+
+Result<std::vector<SocketAddress>> resolve(std::string_view host, uint16_t port, int type,
+                                           bool passive, int family) {
+  return lookup(std::string(host), port, type, passive, family, true, nullptr);
+}
+
+Result<std::vector<SocketAddress>> resolveBounded(std::string_view host, uint16_t port, int type,
+                                                  std::chrono::milliseconds timeout,
+                                                  const WakeSignal *wake) {
+  const std::string hostText(host);
+  bool notFound = false;
+  auto numeric = lookup(hostText, port, type, false, kDefaultFamily, true, &notFound);
+  if (numeric || !notFound) return numeric;
+
+  auto slot = std::make_shared<LookupSlot>();
+  auto done = WakeSignal::create();
+  if (!done) return unexpected<Error>(done.error());
+  slot->done = std::move(*done);
+
+  try {
+    std::thread([slot, hostText, port, type] {
+      auto result = lookup(hostText, port, type, false, kDefaultFamily, false, nullptr);
+      {
+        std::lock_guard<std::mutex> lock(slot->mutex);
+        slot->result = std::move(result);
+      }
+      slot->done.signal();
+    }).detach();
+  } catch (const std::system_error &e) {
+    return fail(ErrorCode::Io, "cannot start the name lookup for '" + hostText + "': " + e.what());
+  }
+
+  auto waited = waitSocket(slot->done.waitHandle(), WaitFor::Readable,
+                           timeout.count() > 0 ? timeout : std::chrono::milliseconds(-1), wake);
+  if (!waited) return unexpected<Error>(waited.error());
+  if (*waited == WaitResult::Woken) {
+    return fail(ErrorCode::Cancelled, "looking up '" + hostText + "' cancelled");
+  }
+  if (*waited == WaitResult::TimedOut) {
+    return fail(ErrorCode::Timeout, "looking up '" + hostText + "' timed out after " +
+                                        std::to_string(timeout.count()) + " ms");
+  }
+  std::lock_guard<std::mutex> lock(slot->mutex);
+  return std::move(*slot->result);
 }
 
 std::string addressToString(const SocketAddress &address) {
