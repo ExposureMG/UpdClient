@@ -383,6 +383,11 @@ TEST(XbdmTransfer, AFailedRenameAfterTheOldFileWasDeletedKeepsTheUpload) {
     CHECK(console->lastCommand().rfind("rename ", 0) == 0);
     CHECK(client.isConnected());
     CHECK(client.pendingCleanup().empty());
+    CHECK_EQ(writer->keptPath().value_or(""), temp);
+    CHECK_EQ(client.keptUploads(), std::vector<std::string>{temp});
+    client.clearKeptUploads();
+    CHECK(client.keptUploads().empty());
+    CHECK_EQ(writer->keptPath().value_or(""), temp);
   }
   // The connection drops at the rename, or at the delete before it: whether
   // either happened is unknown, so nothing is queued for deletion.
@@ -409,9 +414,12 @@ TEST(XbdmTransfer, AFailedRenameAfterTheOldFileWasDeletedKeepsTheUpload) {
     REQUIRE_ERR(r, ErrorCode::Disconnected);
     CHECK_MSG(r.error().message.find("kept as " + temp) != std::string::npos, r.error().message);
     CHECK(client.pendingCleanup().empty());
+    CHECK_EQ(writer->keptPath().value_or(""), temp);
+    CHECK_EQ(client.keptUploads(), std::vector<std::string>{temp});
     REQUIRE_OK(client.reconnect());
     CHECK(next->commands().empty());
     CHECK(fs.files.count(temp) == 1);
+    CHECK_EQ(client.keptUploads(), std::vector<std::string>{temp});
   }
   // Refused before the old file was deleted: it is still there, so the
   // temporary file goes.
@@ -433,7 +441,27 @@ TEST(XbdmTransfer, AFailedRenameAfterTheOldFileWasDeletedKeepsTheUpload) {
     CHECK_ERR(writer->finish(), ErrorCode::Io);
     CHECK_EQ(fs.names(), std::vector<std::string>{"HDD:\\x.txt"});
     CHECK_EQ(fs.files["HDD:\\x.txt"], ut::bytesOf("old"));
+    CHECK(!writer->keptPath().has_value());
+    CHECK(client.keptUploads().empty());
   }
+}
+
+TEST(XbdmTransfer, UploadFromFileReportsAKeptUpload) {
+  ut::TempDir dir;
+  REQUIRE(dir.ok());
+  REQUIRE(ut::writeFile(dir.file("in.bin"), ut::bytesOf("new")));
+  Files fs;
+  fs.files["HDD:\\x.txt"] = ut::bytesOf("old");
+  fs.renameStatus = 414;
+  auto console = FakeConsole::create();
+  fs.install(*console);
+  auto client = connected(console);
+  auto r = client.uploadFromFile(dir.file("in.bin"), "HDD:\\x.txt");
+  REQUIRE(!r);
+  const auto kept = client.keptUploads();
+  REQUIRE_EQ(kept.size(), size_t{1});
+  CHECK(isTemporaryFor(kept[0], "HDD:", "x.txt"));
+  CHECK_EQ(fs.names(), kept);
 }
 
 TEST(XbdmTransfer, ADeleteThatWasNeverSentDoesNotKeepTheUpload) {
@@ -461,6 +489,8 @@ TEST(XbdmTransfer, ADeleteThatWasNeverSentDoesNotKeepTheUpload) {
   CHECK(delivery->delivery == Delivery::NotSent);
   CHECK_EQ(client.pendingCleanup(), std::vector<std::string>{temp});
   CHECK_EQ(fs.files["HDD:\\x.txt"], ut::bytesOf("old"));
+  CHECK(!writer->keptPath().has_value());
+  CHECK(client.keptUploads().empty());
 }
 
 TEST(XbdmTransfer, UploadFindsTheFileToReplaceInTheListingWithoutGetfileattributes) {
@@ -543,6 +573,8 @@ TEST(XbdmTransfer, AFileThatAppearsDuringTheUploadIsNotReplaced) {
   for (const auto &command : console->commands()) CHECK(command != "delete name=\"HDD:\\x.txt\"");
   CHECK(client.isConnected());
   CHECK(client.pendingCleanup().empty());
+  CHECK(!writer->keptPath().has_value());
+  CHECK(client.keptUploads().empty());
   CHECK_OK(client.attributes("HDD:\\x.txt"));
 }
 
@@ -667,6 +699,8 @@ TEST(XbdmTransfer, DropMidUploadLeavesNothingUnderTheFinalNameAndReconnectCleans
   CHECK(!client.transferActive());
   CHECK_EQ(client.pendingCleanup(), std::vector<std::string>{temp});
   CHECK(fs.files.empty());
+  CHECK(!writer->keptPath().has_value());
+  CHECK(client.keptUploads().empty());
   for (const auto &command : first->commands()) {
     if (command.rfind("getfileattributes ", 0) != 0) CHECK(command.find("keep.bin\"") == std::string::npos);
   }
@@ -853,4 +887,24 @@ TEST(XbdmTransfer, ConnectOverLoopbackTcp) {
   CHECK_EQ(client->debugName().value_or(""), std::string("Loopback Kit"));
   client->close();
   CHECK(!client->isConnected());
+}
+
+TEST(XbdmTransfer, KeptUploadsAreBounded) {
+  Files fs;
+  fs.renameStatus = 414;
+  auto console = FakeConsole::create();
+  fs.install(*console);
+  auto client = connected(console);
+  std::string first;
+  for (int i = 0; i < 65; ++i) {
+    fs.files["HDD:\\x.txt"] = ut::bytesOf("old");
+    auto writer = client.openWrite("HDD:\\x.txt", 1);
+    REQUIRE_OK(writer);
+    if (i == 0) first = writer->temporaryPath();
+    REQUIRE_OK(writer->write(ut::Bytes{1}));
+    REQUIRE(!writer->finish());
+  }
+  const auto kept = client.keptUploads();
+  CHECK_EQ(kept.size(), size_t{64});
+  CHECK(std::find(kept.begin(), kept.end(), first) == kept.end());
 }

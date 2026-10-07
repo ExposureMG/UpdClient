@@ -35,6 +35,8 @@ constexpr size_t kMaxShortLineBytes = 512;
 // What a body line counts against maxBodyBytes at least: an empty line costs
 // about this much memory once it is parsed and kept.
 constexpr size_t kMinBodyLineCharge = 64;
+// keptUploads stays bounded on a long-lived client; the oldest names go first.
+constexpr size_t kMaxKeptUploads = 64;
 
 std::span<const uint8_t> bytesOf(std::string_view text) {
   return {reinterpret_cast<const uint8_t *>(text.data()), text.size()};
@@ -188,6 +190,8 @@ struct Session {
 
   bool transferActive = false;
   std::vector<std::string> pendingCleanup;
+  // Uploads finish() kept because they may be the only copy; never deleted here.
+  std::vector<std::string> keptUploads;
   std::optional<StatusLine> lastStatus;
   // How far the last command line got; deliveries counts the commands begun, so a
   // call can tell whether the delivery is its own.
@@ -971,8 +975,19 @@ struct FileWriter::State {
   // Whether a file of the final name existed when openWrite() ran: only then may
   // finish() replace one.
   bool finalExistedAtOpen = false;
+  // Set when finish() failed and kept the temporary file.
+  std::optional<std::string> kept;
 
   std::string context() const { return "sendfile " + path; }
+
+  void keep() {
+    kept = tempPath;
+    if (session->keptUploads.size() >= detail::kMaxKeptUploads) {
+      spdlog::debug("forgetting the kept upload {}", session->keptUploads.front());
+      session->keptUploads.erase(session->keptUploads.begin());
+    }
+    session->keptUploads.push_back(tempPath);
+  }
 
   unexpected<Error> failed(Error error) {
     if (open) {
@@ -1032,6 +1047,10 @@ const std::string &FileWriter::temporaryPath() const noexcept {
   return state_ ? state_->tempPath : empty;
 }
 
+std::optional<std::string> FileWriter::keptPath() const noexcept {
+  return state_ ? state_->kept : std::nullopt;
+}
+
 Result<void> FileWriter::write(std::span<const uint8_t> data) {
   if (!state_) return fail(ErrorCode::NotConnected, "the writer was moved from");
   auto &s = *state_;
@@ -1089,6 +1108,7 @@ Result<void> FileWriter::finish() {
   auto giveUp = [&](Error error) -> Result<void> {
     if (!finalRemoved.empty()) {
       error.message += "; the upload is kept as " + s.tempPath + ", since " + s.path + " " + std::string(finalRemoved);
+      s.keep();
     } else if (session.connected()) {
       s.removeTemporary();
     } else {
@@ -1296,6 +1316,14 @@ std::optional<CommandDelivery> XbdmClient::lastDelivery() const {
 
 std::vector<std::string> XbdmClient::pendingCleanup() const {
   return session_ ? session_->pendingCleanup : std::vector<std::string>{};
+}
+
+std::vector<std::string> XbdmClient::keptUploads() const {
+  return session_ ? session_->keptUploads : std::vector<std::string>{};
+}
+
+void XbdmClient::clearKeptUploads() {
+  if (session_) session_->keptUploads.clear();
 }
 
 Result<void> XbdmClient::reconnect() {

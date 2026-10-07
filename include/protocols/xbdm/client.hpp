@@ -279,8 +279,9 @@ private:
 // while no file of the final name was deleted, deletes the temporary file on the
 // same connection.
 // Once the old file was deleted, or its delete got no answer, the temporary file
-// may be the only copy of either version: a failed rename then keeps it, names it
-// in the error ("the upload is kept as ...") and never queues it for deletion.
+// may be the only copy of either version: a failed rename then keeps it, never
+// queues it for deletion, and reports it through keptPath() and the client's
+// keptUploads() (the error message says so too).
 // abort() or a failure while data is pending has to close the connection, because
 // the console waits for the announced length; the temporary name is then
 // remembered and deleted, best effort, by the client's next reconnect(). The final
@@ -299,6 +300,9 @@ public:
   bool isOpen() const noexcept;
   const std::string &path() const noexcept;
   const std::string &temporaryPath() const noexcept;
+  // The temporary path when finish() failed and kept it, as the only copy of either
+  // version; nullopt otherwise, before finish() included.
+  std::optional<std::string> keptPath() const noexcept;
 
   // More bytes than size() - written() is InvalidArgument; nothing is sent then.
   Result<void> write(std::span<const uint8_t> data);
@@ -388,6 +392,12 @@ public:
   // Temporary upload names left behind by aborted uploads, and by a sendfile whose
   // answer never arrived, deleted by reconnect().
   std::vector<std::string> pendingCleanup() const;
+  // Uploads that finish() failed on and kept, uploadFromFile()'s included, oldest
+  // first (at most 64): each may hold the only copy of the file, so the client
+  // never deletes them. Rename or delete them, then clearKeptUploads(). This is
+  // what this client kept, not live state: another client may have moved them.
+  std::vector<std::string> keptUploads() const;
+  void clearKeptUploads();
 
   // Closes the current connection (if any), opens a new one through the connector
   // and reads the greeting, then deletes the pending temporary files, best effort.
