@@ -1,3 +1,4 @@
+#include "support/loopback_server.hpp"
 #include "support/memory_transport.hpp"
 #include "support/test_harness.hpp"
 #include "support/test_util.hpp"
@@ -10,6 +11,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <thread>
 #include <vector>
@@ -374,6 +376,121 @@ TEST(XbdmCancel, CancelDuringReconnectIsNotLost) {
   REQUIRE_OK(client->reconnect());
   CHECK_EQ(client->debugName().value_or(""), std::string("name"));
 }
+
+TEST(XbdmCancel, AStopEndsTheGreetingWait) {
+  std::string why;
+  auto server = ut::LoopbackServer::start(
+      [](ut::ServerConnection &, const std::atomic<bool> &stop) {
+        while (!stop) std::this_thread::sleep_for(10ms);
+      },
+      &why);
+  if (!server) SKIP("loopback sockets are not available here: " + why);
+  net::Endpoint endpoint;
+  endpoint.scheme = "xbdm";
+  endpoint.host = "127.0.0.1";
+  endpoint.port = server->port();
+  std::stop_source source;
+  std::thread stopper([&] {
+    std::this_thread::sleep_for(150ms);
+    source.request_stop();
+  });
+  const auto start = Clock::now();
+  auto client = XbdmClient::connect(endpoint, patientOptions(), source.get_token());
+  const auto elapsed = msSince(start);
+  stopper.join();
+  CHECK(server->handledConnection());
+  REQUIRE_ERR(client, ErrorCode::Cancelled);
+  CHECK(elapsed < 2000);
+}
+
+TEST(XbdmCancel, AStoppedTokenFailsBeforeTheConnector) {
+  int calls = 0;
+  std::stop_source source;
+  source.request_stop();
+  auto client = XbdmClient::open(
+      [&]() -> Result<net::TransportPtr> {
+        ++calls;
+        return fail(ErrorCode::ConnectFailed, "not reached");
+      },
+      patientOptions(), source.get_token());
+  CHECK_ERR(client, ErrorCode::Cancelled);
+  CHECK_EQ(calls, 0);
+}
+
+TEST(XbdmCancel, AStopDuringOpenEndsTheGreetingWait) {
+  std::unique_ptr<ut::MemoryTransport> server;
+  std::stop_source source;
+  auto connector = [&]() -> Result<net::TransportPtr> {
+    auto pipe = ut::MemoryPipe::create();
+    server = std::move(pipe.server);
+    return net::TransportPtr(std::move(pipe.client));
+  };
+  std::thread stopper([&] {
+    std::this_thread::sleep_for(100ms);
+    source.request_stop();
+  });
+  const auto start = Clock::now();
+  auto client = XbdmClient::open(connector, patientOptions(), source.get_token());
+  const auto elapsed = msSince(start);
+  stopper.join();
+  REQUIRE_ERR(client, ErrorCode::Cancelled);
+  CHECK(elapsed < 2000);
+}
+
+TEST(XbdmCancel, ATokenStoppedAfterOpenLeavesTheClientAlone) {
+  std::vector<std::unique_ptr<PipeConsole>> consoles;
+  auto connector = [&]() -> Result<net::TransportPtr> {
+    auto pipe = ut::MemoryPipe::create();
+    consoles.push_back(std::make_unique<PipeConsole>(std::move(pipe.server), [](PipeConsole &c) {
+      while (auto line = c.readLine()) {
+        if (*line == "bye") return;
+        if (!c.send(std::string_view("200- name\r\n"))) return;
+      }
+    }));
+    return net::TransportPtr(std::move(pipe.client));
+  };
+  std::stop_source source;
+  auto client = XbdmClient::open(connector, patientOptions(), source.get_token());
+  REQUIRE_OK(client);
+  source.request_stop();
+  CHECK_EQ(client->debugName().value_or(""), std::string("name"));
+}
+
+#if !defined(_WIN32)
+TEST(XbdmCancel, CancelInterruptsAReconnectStuckInTheTcpConnect) {
+  auto listener = ut::FirstThenStalledListener::start("201- connected\r\n");
+  if (!listener) SKIP("cannot set up a full accept queue here");
+  net::Endpoint endpoint;
+  endpoint.scheme = "xbdm";
+  endpoint.host = "127.0.0.1";
+  endpoint.port = listener->port();
+  endpoint.timeout = 5000ms;
+  ClientOptions options = patientOptions();
+  // A reconnect that the kernel accepts after all fails on the greeting, long
+  // before the cancel, and the test skips.
+  options.greetingTimeout = 100ms;
+  auto client = XbdmClient::connect(endpoint, options);
+  REQUIRE_OK(client);
+  REQUIRE(listener->waitStalled(5s));
+
+  std::atomic<bool> cancelled{false};
+  Clock::time_point cancelAt;
+  std::thread canceller([&] {
+    std::this_thread::sleep_for(300ms);
+    cancelAt = Clock::now();
+    cancelled = true;
+    client->cancel();
+  });
+  auto r = client->reconnect();
+  const auto end = Clock::now();
+  canceller.join();
+  if (r || r.error().code == ErrorCode::Timeout) SKIP("the kernel still accepted the connection");
+  CHECK_ERR(r, ErrorCode::Cancelled);
+  CHECK(cancelled);
+  CHECK(std::chrono::duration_cast<std::chrono::milliseconds>(end - cancelAt).count() < 1000);
+  CHECK(!client->isConnected());
+}
+#endif
 
 TEST(XbdmCancel, TransferBodiesAreExemptFromTheCommandDeadline) {
   auto pipe = ut::MemoryPipe::create();

@@ -14,6 +14,7 @@
 #include <initializer_list>
 #include <mutex>
 #include <random>
+#include <stop_token>
 #include <string_view>
 #include <system_error>
 #include <utility>
@@ -137,6 +138,22 @@ private:
   std::optional<Error> error_;
 };
 
+// The stop token the connector built by XbdmClient::connect() uses for its next
+// connect: the caller's for the first one, the session's own for a reconnect().
+struct ConnectSlot {
+  std::mutex mutex;
+  std::stop_token token;
+
+  void set(std::stop_token next) {
+    std::lock_guard<std::mutex> lock(mutex);
+    token = std::move(next);
+  }
+  std::stop_token get() {
+    std::lock_guard<std::mutex> lock(mutex);
+    return token;
+  }
+};
+
 struct Session {
   explicit Session(ClientOptions opts, XbdmClient::Connector conn)
       : options(std::move(opts)), connector(std::move(conn)) {}
@@ -156,6 +173,10 @@ struct Session {
   // Counts cancel() calls, so that a reconnect() can tell one that came while it
   // was connecting.
   std::atomic<uint64_t> cancelEpoch{0};
+  // Set when the connector came from XbdmClient::connect(): cancel() then also
+  // stops a reconnect() inside its TCP connect. Both under transportMutex.
+  std::shared_ptr<ConnectSlot> connectSlot;
+  std::stop_source connectStop;
 
   std::vector<uint8_t> buffer;
   size_t bufferPos = 0;
@@ -176,7 +197,18 @@ struct Session {
     std::lock_guard<std::mutex> lock(transportMutex);
     cancelled = true;
     ++cancelEpoch;
+    connectStop.request_stop();
     if (transport) transport->close();
+  }
+
+  // Gives the connector a fresh stop token for a reconnect(). False when cancel()
+  // was called after `epoch` was read.
+  bool armConnect(uint64_t epoch) {
+    std::lock_guard<std::mutex> lock(transportMutex);
+    if (cancelEpoch != epoch) return false;
+    connectStop = std::stop_source();
+    if (connectSlot) connectSlot->set(connectStop.get_token());
+    return true;
   }
 
   // False, with the new transport closed and the old one kept, when cancel() was
@@ -1061,28 +1093,87 @@ XbdmClient::~XbdmClient() {
   if (session_ && !session_->transferActive) session_->closeConnection();
 }
 
+namespace {
+
+Result<net::TransportPtr> connectCancelled(std::string_view what) {
+  return fail(ErrorCode::Cancelled, "connect to " + std::string(what) + " cancelled");
+}
+
+// Connects through the connector, unless the token is already stopped, and reads
+// the greeting; a stop request during the greeting cancels the session. The
+// connector itself runs to its own end, so a token reaches it only through slot.
+Result<std::shared_ptr<Session>> openSession(XbdmClient::Connector connector, ClientOptions options,
+                                             std::stop_token stop, std::shared_ptr<detail::ConnectSlot> slot) {
+  if (!connector) return fail(ErrorCode::InvalidArgument, "no connector");
+  if (stop.stop_requested()) return fail(ErrorCode::Cancelled, "connect cancelled");
+  if (slot) slot->set(stop);
+  auto transport = connector();
+  if (slot) slot->set({});
+  if (!transport) return unexpected<Error>(transport.error());
+  if (!*transport) return fail(ErrorCode::ConnectFailed, "no transport");
+  if (stop.stop_requested()) {
+    (*transport)->close();
+    return fail(ErrorCode::Cancelled, "connect cancelled");
+  }
+  auto session = std::make_shared<Session>(std::move(options), std::move(connector));
+  session->connectSlot = std::move(slot);
+  session->install(std::move(*transport), 0);
+  {
+    std::stop_callback onStop(stop, [raw = session.get()] { raw->cancel(); });
+    if (auto r = session->greet(); !r) return unexpected<Error>(r.error());
+  }
+  if (session->cancelled) {
+    session->closeConnection();
+    return fail(ErrorCode::Cancelled, "connect cancelled after the greeting");
+  }
+  spdlog::debug("connected to XBDM at {}", session->transport->describe());
+  return session;
+}
+
+} // namespace
+
 Result<XbdmClient> XbdmClient::connect(const net::Endpoint &endpoint, ClientOptions options) {
+  return connect(endpoint, std::move(options), std::stop_token());
+}
+
+Result<XbdmClient> XbdmClient::connect(const net::Endpoint &endpoint, ClientOptions options, std::stop_token stop) {
   net::Endpoint target = endpoint;
   std::string scheme = target.scheme;
   std::transform(scheme.begin(), scheme.end(), scheme.begin(),
                  [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  auto slot = std::make_shared<detail::ConnectSlot>();
   Connector connector;
   if (scheme.empty() || scheme == "xbdm") {
     target.scheme = "tcp";
     if (target.port == 0) target.port = kXbdmPort;
-    connector = [target] { return net::TcpTransport::connect(target); };
+    connector = [target, slot] { return net::TcpTransport::connect(target, slot->get()); };
   } else {
+    // A registry connector cannot be interrupted; the token is checked around it.
     target = net::TransportRegistry::instance().withDefaultPort(target, kXbdmPort);
-    connector = [target] { return net::TransportRegistry::instance().connect(target); };
+    connector = [target, slot]() -> Result<net::TransportPtr> {
+      const std::stop_token token = slot->get();
+      if (token.stop_requested()) return connectCancelled(target.host);
+      auto transport = net::TransportRegistry::instance().connect(target);
+      if (transport && *transport && token.stop_requested()) {
+        (*transport)->close();
+        return connectCancelled(target.host);
+      }
+      return transport;
+    };
   }
-  return open(std::move(connector), std::move(options));
+  auto session = openSession(std::move(connector), std::move(options), std::move(stop), std::move(slot));
+  if (!session) return unexpected<Error>(session.error());
+  return XbdmClient(std::move(*session));
 }
 
 Result<XbdmClient> XbdmClient::open(Connector connector, ClientOptions options) {
-  if (!connector) return fail(ErrorCode::InvalidArgument, "no connector");
-  auto transport = connector();
-  if (!transport) return unexpected<Error>(transport.error());
-  return attach(std::move(*transport), std::move(options), std::move(connector));
+  return open(std::move(connector), std::move(options), std::stop_token());
+}
+
+Result<XbdmClient> XbdmClient::open(Connector connector, ClientOptions options, std::stop_token stop) {
+  auto session = openSession(std::move(connector), std::move(options), std::move(stop), nullptr);
+  if (!session) return unexpected<Error>(session.error());
+  return XbdmClient(std::move(*session));
 }
 
 Result<XbdmClient> XbdmClient::attach(net::TransportPtr transport, ClientOptions options, Connector connector) {
@@ -1131,8 +1222,16 @@ Result<void> XbdmClient::reconnect() {
   if (!s.connector) return fail(ErrorCode::Unsupported, "reconnect: the client was attached without a connector");
   const uint64_t epoch = s.cancelEpoch;
   s.closeConnection();
+  if (!s.armConnect(epoch)) return fail(ErrorCode::Cancelled, "reconnect: cancelled before the connection was made");
   auto transport = s.connector();
-  if (!transport) return unexpected<Error>(transport.error());
+  if (!transport) {
+    Error error = transport.error();
+    if (s.cancelEpoch != epoch && error.code != ErrorCode::Cancelled) {
+      error.code = ErrorCode::Cancelled;
+      error.message = "reconnect: cancelled (" + error.message + ")";
+    }
+    return unexpected<Error>(std::move(error));
+  }
   if (!*transport) return fail(ErrorCode::ConnectFailed, "reconnect: the connector returned no transport");
   if (!s.install(std::move(*transport), epoch)) {
     return fail(ErrorCode::Cancelled, "reconnect: cancelled while the connection was being made");

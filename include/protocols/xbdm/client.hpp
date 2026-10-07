@@ -17,6 +17,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -330,9 +331,17 @@ public:
   // registerBuiltins() must have registered tcp; a missing port becomes 730 there
   // too. Endpoint::timeout bounds the TCP connect.
   static Result<XbdmClient> connect(const net::Endpoint &endpoint, ClientOptions options = {});
+  // As above; a stop request ends the connect (xbdm and bare hosts: the TCP connect
+  // and its name lookup; other schemes: checked before and after the registry's
+  // connect) and the greeting at once with Cancelled. The token is used only during
+  // the call; afterwards cancel() ends calls in progress, reconnect() included.
+  static Result<XbdmClient> connect(const net::Endpoint &endpoint, ClientOptions options, std::stop_token stop);
   // Opens a connection through the connector and reads the greeting. reconnect()
   // uses the same connector.
   static Result<XbdmClient> open(Connector connector, ClientOptions options = {});
+  // As above; a stop request ends the greeting at once with Cancelled. The
+  // connector runs to its own end, and the token is checked once it returns.
+  static Result<XbdmClient> open(Connector connector, ClientOptions options, std::stop_token stop);
   // Reads the greeting from a connection that was just made. Without a connector,
   // reconnect() is Unsupported.
   static Result<XbdmClient> attach(net::TransportPtr transport, ClientOptions options = {},
@@ -365,6 +374,9 @@ public:
   void close() noexcept;
   // Thread-safe. Closes the connection at once; the call in progress fails with
   // Cancelled, a reconnect() that is still connecting included. Does not wait for it.
+  // A client made by connect() also ends a reconnect()'s TCP connect at once; with a
+  // connector given to open() or attach(), cancel() takes effect when the connector
+  // returns.
   void cancel() noexcept;
 
   // Console information (section 3.1).

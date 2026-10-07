@@ -265,6 +265,75 @@ private:
   std::vector<SocketHandle> fillers_;
   uint16_t port_ = 0;
 };
+
+// Accepts one connection, sends it `greeting` and keeps it open, then fills the
+// accept queue as StalledListener does, so the next connect() hangs.
+class FirstThenStalledListener {
+public:
+  static std::unique_ptr<FirstThenStalledListener> start(std::string greeting) {
+    auto self = std::unique_ptr<FirstThenStalledListener>(new FirstThenStalledListener());
+    self->listener_ = SocketHandle(::socket(AF_INET, SOCK_STREAM, 0));
+    if (!self->listener_.valid()) return nullptr;
+    sockaddr_in address = loopbackAddress(0);
+    if (::bind(self->listener_.get(), reinterpret_cast<sockaddr *>(&address), sizeof(address)) != 0) {
+      return nullptr;
+    }
+    if (::listen(self->listener_.get(), 0) != 0) return nullptr;
+    socklen_t length = sizeof(address);
+    if (::getsockname(self->listener_.get(), reinterpret_cast<sockaddr *>(&address), &length) != 0) {
+      return nullptr;
+    }
+    self->port_ = ntohs(address.sin_port);
+    self->thread_ = std::thread([raw = self.get(), greeting = std::move(greeting)] { raw->run(greeting); });
+    return self;
+  }
+
+  FirstThenStalledListener(const FirstThenStalledListener &) = delete;
+  FirstThenStalledListener &operator=(const FirstThenStalledListener &) = delete;
+  ~FirstThenStalledListener() {
+    stop_ = true;
+    if (thread_.joinable()) thread_.join();
+  }
+
+  uint16_t port() const noexcept { return port_; }
+  // True once the first connection was greeted and the queue is full.
+  bool waitStalled(std::chrono::milliseconds timeout) const {
+    const auto until = std::chrono::steady_clock::now() + timeout;
+    while (!stalled_ && std::chrono::steady_clock::now() < until) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return stalled_;
+  }
+
+private:
+  FirstThenStalledListener() = default;
+
+  void run(const std::string &greeting) {
+    if (!waitReadableMs(listener_.get(), 5000)) return;
+    NativeSocket accepted = ::accept(listener_.get(), nullptr, nullptr);
+    if (accepted == kNoSocket) return;
+    ServerConnection first{SocketHandle(accepted)};
+    if (!first.sendAll(bytesOf(greeting))) return;
+    for (int i = 0; i < 6; ++i) {
+      SocketHandle filler(::socket(AF_INET, SOCK_STREAM, 0));
+      if (!filler.valid()) break;
+      ::fcntl(filler.get(), F_SETFL, ::fcntl(filler.get(), F_GETFL, 0) | O_NONBLOCK);
+      sockaddr_in target = loopbackAddress(port_);
+      (void)::connect(filler.get(), reinterpret_cast<sockaddr *>(&target), sizeof(target));
+      fillers_.push_back(std::move(filler));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    stalled_ = true;
+    while (!stop_) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+
+  SocketHandle listener_;
+  std::vector<SocketHandle> fillers_;
+  uint16_t port_ = 0;
+  std::atomic<bool> stop_{false};
+  std::atomic<bool> stalled_{false};
+  std::thread thread_;
+};
 #endif
 
 } // namespace ut
