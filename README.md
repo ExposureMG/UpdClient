@@ -232,8 +232,13 @@ Things to know:
   `Endpoint::kMaxTimeout`, 24 hours) sets `Endpoint::timeout`, which bounds the connect and the initial
   read/write timeout. Other options are kept in `Endpoint::options` for transports that need them.
 - To cancel a long read or write, call `close()` on its transport from another thread: the blocked
-  call returns `ErrorCode::Cancelled` at once instead of waiting for its timeout. A TCP connect cannot
-  be cancelled this way; it is bounded by `Endpoint::timeout`.
+  call returns `ErrorCode::Cancelled` at once instead of waiting for its timeout. A TCP connect has no
+  transport to close yet: pass a `std::stop_token` to `TcpTransport::connect` (or to the XBDM connect
+  and discovery calls below), and `request_stop()` ends it at once with `Cancelled`; without one it is
+  bounded by `Endpoint::timeout`.
+- TCP hosts are IPv4 addresses or host names. A name is looked up within `Endpoint::timeout`, and a
+  stop request ends the lookup too; a name that does not resolve is `InvalidArgument`. UDP sockets
+  take numeric addresses only.
 - Protocol clients never create sockets. `UpdServerClient` takes a `net::TransportPtr` (or connects
   one through `TransportRegistry`); `XellClient` takes a connector returning a transport. Anything
   that implements `net::ITransport` can carry either protocol.
@@ -258,9 +263,17 @@ Things to know:
   limits connections and refuses with 401). `cancel()`, `FileReader::cancel()` and
   `FileWriter::cancel()` may be called from any thread. Console paths are `HDD:\dir\file`;
   `xbdm::toConsolePath` converts `/HDD/dir/file`. `ClientOptions::trace` receives every command and
-  text line, and the size of binary data, never its bytes. An upload that replaces a file deletes the
-  old one right before the rename; if the rename then fails, the data stays under the temporary name,
-  which the error names, and is never deleted. Every answer is bounded as a whole as well as between
+  text line, and the size of binary data, never its bytes. An upload replaces only a file that existed
+  when `openWrite()` ran: it deletes it right before the rename, while a file that appeared during the
+  upload fails `finish()` with `InvalidArgument` and is left alone. If the rename fails after the
+  delete, the data stays under the temporary name, which `FileWriter::keptPath()` and
+  `XbdmClient::keptUploads()` report, and is never deleted. After a failed call that changes something,
+  `lastDelivery()` says whether its command reached the console (`NotSent` is safe to repeat, `Sent`
+  may have happened). A rename that only changes the case of a name is allowed. `XbdmClient::connect`
+  and `open`, `XbdmDiscovery::discover`, `findByName`, `probeAddress`, `xbdm::identify` and
+  `DiscoveryRegistry::discoverAll` have `std::stop_token` overloads, so a GUI can cancel them with one
+  `std::stop_source` per operation; a stopped search returns what it found. `cancel()` also ends a
+  `reconnect()` stuck in its TCP connect. Every answer is bounded as a whole as well as between
   bytes (the greeting by `greetingTimeout`, the answer to `bye` by `byeTimeout`, everything else but
   file data by `commandTimeout`), so a console that trickles bytes cannot hold a call indefinitely.
 - The library logs through spdlog, which stays out of the public headers. A library user can set
@@ -295,8 +308,13 @@ The protocol follows the target: with `--target xbdm://host[:port]` the commands
 XBDM" below speak XBDM, and UpdServer-only commands refuse the target (exit 2). The `xbdm` group always
 speaks XBDM; there a bare host (`--target 192.168.1.50` or `--ip`) means `xbdm://`, and without a target
 the first console found by XBDM discovery is used. Console paths are `HDD:\dir\file` or
-`/HDD/dir/file`. During an XBDM command Ctrl-C cancels the transfer in progress (exit 1); an interrupted
-upload's temporary file is deleted over a new connection, or named in a warning. Text the console sends
+`/HDD/dir/file`. During an XBDM command Ctrl-C cancels what is in progress, the connect and the greeting
+included (exit 1, `Cancelled`); an interrupted upload's temporary file is deleted over a new connection,
+or named in a warning, also when Ctrl-C arrives during that cleanup. During `discover`, or while the
+`xbdm` group looks for a console, Ctrl-C ends the search: `discover` prints what it found and exits 1.
+A failed XBDM command's `--json` error may carry `kept_upload` (an upload kept on the console as the only
+copy; rename it with `xbdm mv`) and `command_delivery` (`not_sent`, or `unknown` when the console may have
+carried the command out). Text the console sends
 (names, `info`, `xbdm raw` answers) is printed with control characters and bytes above 0x7E as `\xNN`;
 `--json` output carries it unchanged, JSON-escaped.
 
@@ -406,8 +424,9 @@ The console must be on the same broadcast domain. Passing `--target` or `--ip` s
 entirely and needs no privileges.
 
 XBDM discovery needs no privileges: it broadcasts a name query to UDP port 730 from an ephemeral port
-and collects the replies, then asks each console its name over TCP. Many networks drop the broadcast;
-name the console with `--target xbdm://<address>` then.
+and collects the replies, then asks each console its name over TCP. Devices are reported with the
+port that was searched, and an auto-discovered target uses it (`--port` still wins). Many networks drop
+the broadcast; name the console with `--target xbdm://<address>` then.
 
 ## Project layout
 

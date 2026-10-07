@@ -655,11 +655,15 @@ parent folder (3.4); when neither gives one, the file is asked for without that 
 
 **Contract:** an upload goes to a temporary name in the target folder
 (`<name>.<random>.part`, a FATX-valid name of at most 42 characters), then is renamed
-to the final name after `200`. If the final name exists the client deletes it right
-before the rename (the app's Replace confirmation has already been given). From that
-delete on, the temporary file may be the only copy of either version: if the rename
-fails, or the delete's answer is lost, the temporary file is kept, never queued for
-deletion, and its name is in the error. A cancel or
+to the final name after `200`. The client looks the final name up before `sendfile`
+(a folder there fails before the data) and again after `200`. It replaces a file only
+if one existed at the first lookup, deleting it right before the rename (the app's
+Replace confirmation has already been given); a file that appeared during the upload is
+left alone, the temporary file is deleted and the upload fails. A file that appears
+between the second lookup and the rename cannot be detected on a console whose `rename`
+replaces (question 40). From that delete on, the temporary file may be the only copy of either version: if the rename
+fails, or the delete's answer is lost after its line went out, the temporary file is
+kept, never queued for deletion, and the client reports its name. A cancel or
 a drop closes the connection; on the next connection the client deletes the temporary
 file, best effort. That includes a connection that fails after the `sendfile` line was sent
 but before its 204 was read, because the console may already have created the file (the mock
@@ -710,7 +714,11 @@ cut and paste and ME's `MoveFile` are `rename` to another folder
   cross-volume rename is probably refused with 409 **[inf]**.
 
 **Contract:** `rename()` stays inside one folder and one drive. The client checks that
-the new name does not exist before sending.
+the new name does not exist before sending. A new name that differs from the old one only
+in case is sent without that check (FATX ignores case, so the check would find the file
+itself); if the console refuses it with 410 or 400, the client renames through an
+intermediate `<name>.<random>.ren` in the same folder, renames back when the second step
+fails, and says where the file is when that fails too (question 41).
 
 ### 3.11 `setfileattributes`
 
@@ -1183,6 +1191,12 @@ Added when the client first ran against the mock (docs/HARDWARE_TEST_PLAN.md, N1
 38. Does a reboot drop every connection, or only the one that asked for it?
 39. Screenshot: the field order and separators of the geometry line, and how `framebuffersize`
     relates to `pitch * height`.
+
+Added with the upload replace rule and case-only renames (docs/GAP_FIX_PLAN.md):
+
+40. Does `rename` onto an existing name answer 410, or replace the file?
+41. Is a `rename` that changes only the case of a name accepted, and does it change the stored
+    case?
 
 ## 7. Known defects in the references (do not copy)
 

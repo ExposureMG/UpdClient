@@ -733,11 +733,11 @@ Rules for CLI commands:
 
 ## Known limitations
 
-- Addresses are numeric. `platform::resolve` passes `AI_NUMERICHOST`, and TCP resolves with
-  `kDefaultFamily` (`AF_INET`), so a host name or an IPv6 literal fails with `InvalidArgument`.
-  `UdpSocket` can already bind and send over IPv6 (`DatagramBindOptions::family`), but nothing in the
-  built-in providers uses it. `Endpoint::parse` already
-  accepts `[::1]:49`.
+- IPv4 only. TCP resolves with `kDefaultFamily` (`AF_INET`): host names work (looked up on a short-lived
+  thread within `Endpoint::timeout`, ended by a stop token), but an IPv6 literal, or a name that resolves
+  only to IPv6, fails. UDP sockets take numeric addresses only. `UdpSocket` can already bind and send
+  over IPv6 (`DatagramBindOptions::family`), but nothing in the built-in providers uses it.
+  `Endpoint::parse` already accepts `[::1]:49`.
 - Discovery listens only for UpdServer UDP broadcasts on IPv4, and port 48 needs privileges on Linux.
   XeLL has no discovery; `xell::XellProbeProvider` probes endpoints you list and is not registered by
   default or used by the CLI.
@@ -761,7 +761,10 @@ Rules for CLI commands:
   another `Transfer-Encoding` are rejected as `Unsupported`.
 - Clients and transports are not thread-safe, except `ITransport::close()` and `isOpen()`; the two
   registries are.
-- A TCP connect cannot be cancelled from another thread; it is bounded by `Endpoint::timeout`.
+- A TCP connect is cancelled through the `std::stop_token` overload of `TcpTransport::connect`, not by
+  `close()`; connectors other than the built-in TCP one (a registry scheme, one given to
+  `XbdmClient::open`) run to their own end, and the token is checked around them. Discovery providers
+  other than `XbdmDiscovery` take no token and run to their timeout.
 - `Context::explicitEndpoint` knows three services; `resolveUpdServerEndpoint` treats discovered devices
   as `tcp` endpoints.
 - The library has a C++ API only. A shared build exports `UPDCLIENT_API` symbols that use `std::string`
@@ -774,18 +777,18 @@ Rules for CLI commands:
 
 Each item lists the files it would touch. "Add" means a new file.
 
-### IPv6 and host names
+### IPv6
 
 - `src/net/platform/socket_platform.hpp`: change `kDefaultFamily` from `AF_INET` to `AF_UNSPEC`.
-- `src/net/platform/socket_platform.cpp`: in `resolve`, drop `AI_NUMERICHOST` for host names and update
-  the "numeric IP address required" message. `getaddrinfo` is blocking and not bounded by
-  `Endpoint::timeout`, so decide how to bound DNS time.
+- `src/net/platform/socket_platform.cpp`: `resolveBounded` already looks host names up within the
+  timeout; it only needs the family.
 - `src/net/tcp_transport.cpp`: already tries every resolved address and creates the socket from each
   address family; only `describe()` needs to bracket IPv6 literals.
 - `src/net/udp_socket.cpp`: binding the announcement port for IPv6 needs a dual-stack or second socket.
 - `tests/net/tcp_loopback_test.cpp` and `tests/support/loopback_server.hpp`: add IPv6 loopback cases (the
   support server is IPv4 only).
-- `src/cli/app.cpp`: help text says "IP"; the endpoint handling in `src/cli/context.cpp` needs no change.
+- `src/cli/app.cpp`: the help text names IPv4 examples only; the endpoint handling in `src/cli/context.cpp`
+  needs no change.
 
 No public header changes: `Endpoint` already carries a string host.
 

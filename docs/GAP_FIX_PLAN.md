@@ -1,6 +1,6 @@
 # Plan: seven gaps in the XBDM client, the TCP transport and discovery
 
-Status: plan only; nothing here is implemented yet. Line numbers refer to commit `ad83582`.
+Status: implemented as C1 to C10 (see "Suggested commits"). Line numbers refer to commit `ad83582`.
 
 ## Ground rules
 
