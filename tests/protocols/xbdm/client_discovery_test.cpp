@@ -265,6 +265,45 @@ TEST(XbdmDiscovery, DbgnameOverTcpReplacesTheUdpName) {
   CHECK_EQ(asked, (std::vector<std::string>{"10.0.0.1:730", "10.0.0.2:730"}));
 }
 
+TEST(XbdmDiscovery, RepliesFromTooManyAddressesAreIgnored) {
+  // Anyone on the network can send name replies.
+  auto network = FakeNetwork::create();
+  for (int i = 0; i < 300; ++i) {
+    network->replyToSend(0, reply("spoof"), "10.0." + std::to_string(i / 250) + "." + std::to_string(i % 250));
+  }
+  DiscoveryOptions options = udpOnly();
+  options.maxDevices = 20;
+  XbdmDiscovery discovery(network->factory(), options);
+  auto found = discovery.discover(50ms, false);
+  REQUIRE_OK(found);
+  CHECK_EQ(found->size(), size_t{20});
+  CHECK_EQ(found->back().address, std::string("10.0.0.19"));
+}
+
+TEST(XbdmDiscovery, NameQueriesShareOneBudget) {
+  auto network = FakeNetwork::create();
+  for (int i = 1; i <= 50; ++i) network->replyToSend(0, reply("udp"), "10.0.0." + std::to_string(i));
+  int asked = 0;
+  auto connector = [&](const net::Endpoint &endpoint) -> Result<net::TransportPtr> {
+    ++asked;
+    CHECK(endpoint.timeout <= 200ms);
+    std::this_thread::sleep_for(40ms);
+    return fail(ErrorCode::ConnectFailed, "unreachable");
+  };
+  DiscoveryOptions options;
+  options.nameQueryBudget = 200ms;
+  XbdmDiscovery discovery(network->factory(), options, connector);
+  const auto start = std::chrono::steady_clock::now();
+  auto found = discovery.discover(20ms, false);
+  const auto elapsed = std::chrono::steady_clock::now() - start;
+  REQUIRE_OK(found);
+  CHECK_EQ(found->size(), size_t{50});
+  CHECK(asked >= 2);
+  CHECK(asked <= 7);
+  CHECK(elapsed < 2s);
+  CHECK_EQ(found->back().info.at("name"), std::string("udp"));
+}
+
 TEST(XbdmDiscovery, IdentifyConnectsByAddressOnly) {
   auto &registry = net::TransportRegistry::instance();
   std::shared_ptr<xt::FakeConsole> console;

@@ -119,7 +119,12 @@ Result<std::vector<discovery::DiscoveredDevice>> XbdmDiscovery::run(const Search
     }
     if (!search.wantedSender.empty() && datagram.senderAddress != search.wantedSender) continue;
     if (!search.wantedName.empty() && !sameName(*replyName, search.wantedName)) continue;
-    if (!seen.insert(datagram.senderAddress).second) continue;
+    if (seen.count(datagram.senderAddress) != 0) continue;
+    if (devices.size() >= options_.maxDevices) {
+      spdlog::warn("XBDM discovery: more than {} addresses answered; ignoring the rest", options_.maxDevices);
+      break;
+    }
+    seen.insert(datagram.senderAddress);
 
     devices.push_back(deviceFor(datagram.senderAddress, *replyName, kXbdmPort));
     spdlog::debug("XBDM console '{}' at {}", *replyName, datagram.senderAddress);
@@ -131,20 +136,42 @@ Result<std::vector<discovery::DiscoveredDevice>> XbdmDiscovery::run(const Search
 
 void XbdmDiscovery::resolveNames(std::vector<discovery::DiscoveredDevice> &devices) {
   if (!options_.queryNames) return;
+  const bool budgeted = options_.nameQueryBudget.count() > 0;
+  const auto budgetEnd = net::deadlineAfter(options_.nameQueryBudget);
+  size_t asked = 0;
   for (auto &device : devices) {
+    ClientOptions options = options_.nameQuery;
+    if (budgeted) {
+      const auto remaining = std::chrono::floor<milliseconds>(budgetEnd - std::chrono::steady_clock::now());
+      if (remaining <= milliseconds(0)) {
+        spdlog::debug("XBDM discovery: no time left to ask {} of {} consoles for their names",
+                      devices.size() - asked, devices.size());
+        break;
+      }
+      // Every wait of the query fits in what is left of the budget.
+      auto cap = [&](milliseconds &timeout) {
+        if (timeout.count() == 0 || timeout > remaining) timeout = remaining;
+      };
+      cap(options.greetingTimeout);
+      cap(options.idleTimeout);
+      cap(options.commandTimeout);
+      cap(options.byeTimeout);
+    }
+    ++asked;
+
     net::Endpoint endpoint;
     endpoint.scheme = "xbdm";
     endpoint.host = device.address;
     endpoint.port = kXbdmPort;
-    endpoint.timeout = options_.nameQuery.greetingTimeout;
+    endpoint.timeout = options.greetingTimeout;
 
     Result<XbdmClient> client = connector_
                                     ? [&]() -> Result<XbdmClient> {
                                         auto transport = connector_(endpoint);
                                         if (!transport) return unexpected<Error>(transport.error());
-                                        return XbdmClient::attach(std::move(*transport), options_.nameQuery);
+                                        return XbdmClient::attach(std::move(*transport), options);
                                       }()
-                                    : XbdmClient::connect(endpoint, options_.nameQuery);
+                                    : XbdmClient::connect(endpoint, options);
     if (!client) {
       spdlog::debug("XBDM discovery: {} did not answer over TCP: {}", device.address, formatError(client.error()));
       continue;

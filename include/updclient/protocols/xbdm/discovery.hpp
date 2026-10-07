@@ -26,9 +26,16 @@ struct DiscoveryOptions {
   // Datagrams sent per search, spread evenly over its timeout: the first and the
   // retries.
   int sends = 3;
+  // Replies from more addresses than this are ignored: anyone on the network can
+  // send them.
+  size_t maxDevices = 256;
   // Ask every console that answered for its dbgname over TCP; that name replaces
   // the UDP one (section 2.2). A console that does not answer keeps its UDP name.
   bool queryNames = true;
+  // For all dbgname queries of one search together, one after another; consoles
+  // not asked by then keep their UDP names. Each query is also bounded by
+  // nameQuery, and the TCP connect by its greetingTimeout. Zero is no budget.
+  std::chrono::milliseconds nameQueryBudget{10000};
   ClientOptions nameQuery = [] {
     ClientOptions o;
     o.greetingTimeout = std::chrono::milliseconds(2000);
