@@ -29,11 +29,14 @@ void Output::result(const nlohmann::json &data, std::string_view text) {
   std::cout.flush();
 }
 
-void Output::error(std::string_view code, std::string_view message, int sysError, int consoleStatus) {
+void Output::error(std::string_view code, std::string_view message, int sysError, int consoleStatus,
+                   const std::optional<std::string> &keptUpload, const std::optional<std::string> &delivery) {
   if (!json_) return;
   nlohmann::json error = {{"code", std::string(code)}, {"message", std::string(message)}};
   if (sysError != 0) error["os_error"] = sysError;
   if (consoleStatus != 0) error["console_status"] = consoleStatus;
+  if (keptUpload) error["kept_upload"] = *keptUpload;
+  if (delivery) error["command_delivery"] = *delivery;
   writeDocument({{"error", std::move(error)}});
 }
 

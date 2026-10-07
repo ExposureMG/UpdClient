@@ -6,6 +6,8 @@
 #include <spdlog/spdlog.h>
 
 #include <memory>
+#include <mutex>
+#include <stop_token>
 
 namespace updclient::cli {
 
@@ -58,13 +60,34 @@ Outcome<void> withXbdm(Context &context, const std::string &destructiveAction, c
     options.trace = trace->hook();
   }
 
-  auto client = xbdm::XbdmClient::connect(*endpoint, options);
-  if (!client) return fromError(client.error());
+  // One Ctrl-C scope from the connect to the end of the cleanup: before a client
+  // exists it stops the connect, afterwards it cancels the call in progress.
+  std::stop_source stop;
+  std::mutex activeMutex;
+  xbdm::XbdmClient *active = nullptr;
+  InterruptScope interrupt([&] {
+    stop.request_stop();
+    std::lock_guard<std::mutex> lock(activeMutex);
+    if (active) active->cancel();
+  });
 
-  Outcome<void> outcome;
+  auto client = xbdm::XbdmClient::connect(*endpoint, options, stop.get_token());
+  if (!client) return fromError(client.error());
   {
-    InterruptScope interrupt([&client] { client->cancel(); });
-    outcome = body(*client, *endpoint);
+    std::lock_guard<std::mutex> lock(activeMutex);
+    active = &*client;
+    if (stop.stop_requested()) client->cancel();
+  }
+
+  Outcome<void> outcome = body(*client, *endpoint);
+  if (!outcome) {
+    // What a GUI would read from the client, for the JSON error and the log.
+    Failure &failure = outcome.error();
+    if (const auto kept = client->keptUploads(); !kept.empty()) failure.keptUpload = kept.back();
+    const auto delivery = client->lastDelivery();
+    if (failure.consoleStatus == 0 && delivery && delivery->delivery != xbdm::Delivery::Answered) {
+      failure.delivery = delivery->delivery == xbdm::Delivery::NotSent ? "not_sent" : "unknown";
+    }
   }
 
   const auto leftovers = client->pendingCleanup();
@@ -76,6 +99,10 @@ Outcome<void> withXbdm(Context &context, const std::string &destructiveAction, c
         spdlog::warn("The unfinished upload {} is still on the console; delete it with 'xbdm rm'", name);
       }
     }
+  }
+  {
+    std::lock_guard<std::mutex> lock(activeMutex);
+    active = nullptr;
   }
   return outcome;
 }

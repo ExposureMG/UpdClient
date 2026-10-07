@@ -18,10 +18,11 @@ Outcome<void> withUpdServer(Context &context, const std::string &destructiveActi
 
 using XbdmBody = std::function<Outcome<void>(xbdm::XbdmClient &, const net::Endpoint &)>;
 
-// As withUpdServer, for an XBDM console (Context::resolveXbdmEndpoint). While body
-// runs, Ctrl-C cancels the call in progress; an upload cut short that way has its
-// temporary file deleted over a new connection, or named in a warning. --trace
-// records the session.
+// As withUpdServer, for an XBDM console (Context::resolveXbdmEndpoint). From the
+// connect to the end, Ctrl-C cancels what is in progress: the connect and greeting,
+// the call, or the cleanup; an upload cut short has its temporary file deleted over
+// a new connection, or named in a warning. A failure carries the client's kept
+// upload and how far its command got. --trace records the session.
 Outcome<void> withXbdm(Context &context, const std::string &destructiveAction, const XbdmBody &body);
 
 using XellBody = std::function<Outcome<void>(const xell::XellClient &, const net::Endpoint &)>;

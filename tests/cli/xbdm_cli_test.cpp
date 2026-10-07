@@ -1,4 +1,5 @@
 #include "protocols/xbdm/integration_support.hpp"
+#include "support/loopback_server.hpp"
 
 #include <core/hex.hpp>
 
@@ -329,4 +330,97 @@ TEST(XbdmCli, CtrlCCancelsAnUploadAndDeletesTheTemporaryFile) {
   CHECK_MSG(contains(run.err, "Deleted the unfinished upload"), describe(run));
   CHECK(partFiles(cli.rig.mock, "HDD:\\").empty());
   CHECK(!cli.rig.mock.entry("HDD:\\big.bin").has_value());
+}
+
+TEST(XbdmCli, AKeptUploadIsNamedInTheJsonError) {
+  CliRig cli;
+  ut::TempDir dir;
+  REQUIRE(ut::writeFile(dir.file("new"), ut::bytesOf("new contents")));
+  cli.rig.mock.inject(XbdmFault::refusal("414- access denied").on("rename"));
+  auto run = cli.run({"--json", "file", "send", dir.file("new").string(), "HDD:\\default.xex"});
+  CHECK_MSG(run.exit == 1, describe(run));
+  const auto parts = partFiles(cli.rig.mock, "HDD:\\");
+  REQUIRE_EQ(parts.size(), size_t{1});
+  CHECK_MSG(contains(run.out, "\"kept_upload\": \"HDD:\\\\" + parts[0] + "\""), describe(run));
+  CHECK_MSG(contains(run.err, "rename it with 'xbdm mv'"), describe(run));
+  CHECK(!cli.rig.mock.entry("HDD:\\default.xex").has_value());
+}
+
+TEST(XbdmCli, ADeleteWithoutAnAnswerHasAnUnknownDelivery) {
+  CliRig cli;
+  cli.rig.mock.inject(XbdmFault::dropAfterBytes(0).on("delete"));
+  auto run = cli.run({"--json", "--yes", "xbdm", "rm", "HDD:\\default.xex"});
+  CHECK_MSG(run.exit == 1, describe(run));
+  CHECK_MSG(contains(run.out, "\"command_delivery\": \"unknown\""), describe(run));
+  CHECK_MSG(contains(run.err, "may have carried the command out"), describe(run));
+
+  // A refusal is an answer: no delivery field.
+  auto refused = cli.run({"--json", "--yes", "xbdm", "rm", "HDD:\\no such file"});
+  CHECK_MSG(refused.exit == 1, describe(refused));
+  CHECK_MSG(!contains(refused.out, "command_delivery"), describe(refused));
+}
+
+TEST(XbdmCli, CtrlCWhileConnectingIsCancelled) {
+  std::string why;
+  auto silent = ut::LoopbackServer::start(
+      [](ut::ServerConnection &, const std::atomic<bool> &stop) {
+        while (!stop) std::this_thread::sleep_for(10ms);
+      },
+      &why);
+  if (!silent) SKIP("loopback sockets are not available here: " + why);
+  std::chrono::steady_clock::time_point signalled;
+  auto run = runCli({"--target", "xbdm://127.0.0.1:" + std::to_string(silent->port()), "--timeout-ms", "20000",
+                     "xbdm", "ls", "HDD:\\"},
+                    [&](int pid) {
+                      for (int i = 0; i < 2500 && !silent->handledConnection(); ++i) std::this_thread::sleep_for(2ms);
+                      std::this_thread::sleep_for(100ms);
+                      signalled = std::chrono::steady_clock::now();
+#if !defined(_WIN32)
+                      ::kill(pid, SIGINT);
+#else
+                      (void)pid;
+#endif
+                    });
+  CHECK(std::chrono::steady_clock::now() - signalled < 2s);
+  CHECK_MSG(run.exit == 1 && contains(run.err, "Cancelled"), describe(run));
+}
+
+TEST(XbdmCli, CtrlCDuringTheCleanupReconnectWarnsAboutTheUpload) {
+  CliRig cli;
+  ut::TempDir dir;
+  REQUIRE(ut::writeFile(dir.file("big"), ut::patternBytes(1u << 20, 3)));
+  cli.rig.mock.inject(XbdmFault::dropUploadAfterBytes(4096).on("sendfile"));
+  // The reconnect that would delete the temporary file never gets its greeting.
+  cli.rig.mock.inject(XbdmFault::silence().onGreeting().onConnection(1));
+  std::chrono::steady_clock::time_point signalled;
+  auto run = cli.run({"file", "send", dir.file("big").string(), "HDD:\\big.bin"}, [&](int pid) {
+    for (int i = 0; i < 2500 && cli.rig.mock.connectionsAccepted() < 2; ++i) std::this_thread::sleep_for(2ms);
+    std::this_thread::sleep_for(100ms);
+    signalled = std::chrono::steady_clock::now();
+#if !defined(_WIN32)
+    ::kill(pid, SIGINT);
+#else
+    (void)pid;
+#endif
+  });
+  CHECK(std::chrono::steady_clock::now() - signalled < 2s);
+  CHECK_MSG(run.exit == 1, describe(run));
+  CHECK_MSG(contains(run.err, "is still on the console; delete it with 'xbdm rm'"), describe(run));
+  CHECK_EQ(partFiles(cli.rig.mock, "HDD:\\").size(), size_t{1});
+}
+
+TEST(XbdmCli, CtrlCDuringDiscoveryPrintsWhatWasFound) {
+  std::chrono::steady_clock::time_point signalled;
+  auto run = runCli({"--discovery-timeout-ms", "20000", "discover", "--protocol", "xbdm"}, [&](int pid) {
+    std::this_thread::sleep_for(300ms);
+    signalled = std::chrono::steady_clock::now();
+#if !defined(_WIN32)
+    ::kill(pid, SIGINT);
+#else
+    (void)pid;
+#endif
+  });
+  if (run.exit == 3 && contains(run.err, "unavailable")) SKIP("UDP broadcast is not available here");
+  CHECK(std::chrono::steady_clock::now() - signalled < 2s);
+  CHECK_MSG(run.exit == 1 && contains(run.err, "Cancelled"), describe(run));
 }

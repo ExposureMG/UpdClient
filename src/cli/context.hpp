@@ -23,6 +23,11 @@ struct Failure {
   int exitCode = kExitRuntime;
   // The 4xx status of an XBDM refusal; sysError is 0 then.
   int consoleStatus = 0;
+  // An XBDM upload that failed but is kept on the console under this name.
+  std::optional<std::string> keptUpload = std::nullopt;
+  // How far the failed XBDM command got: "not_sent", or "unknown" when it may
+  // have been carried out.
+  std::optional<std::string> delivery = std::nullopt;
 };
 
 template <class T> using Outcome = expected<T, Failure>;

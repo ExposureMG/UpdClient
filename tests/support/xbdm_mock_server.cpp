@@ -422,6 +422,11 @@ XbdmFault XbdmFault::reply(Bytes raw) {
   return f;
 }
 XbdmFault XbdmFault::statusLine(std::string_view text) { return reply(std::string(text) + "\r\n"); }
+XbdmFault XbdmFault::refusal(std::string_view text) {
+  XbdmFault f = statusLine(text);
+  f.skipCommand = true;
+  return f;
+}
 XbdmFault XbdmFault::oversizedLine(size_t length) {
   std::string text(length, 'x');
   text.replace(0, 5, "200- ");
@@ -1475,6 +1480,7 @@ void serveConnection(State &st, Connection &c, bool refuse) {
     Reply reply;
     if (received->overLong) reply = status(406);
     else if (args.name.empty()) reply = status(407);
+    else if (fault && fault->skipCommand && fault->replaceWith) reply = Reply{};
     else if (auto r = simpleCommand(ctx, fault)) reply = std::move(*r);
     else reply = status(407);
     // A reboot drops the connections open when it was asked for, not ones made

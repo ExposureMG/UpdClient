@@ -250,6 +250,9 @@ struct XbdmFault {
   std::chrono::milliseconds stallFor{0};
   // Send these bytes instead of the reply.
   std::optional<Bytes> replaceWith;
+  // Do not carry the command out (not for sendfile), so a replaced reply that
+  // refuses it is the truth.
+  bool skipCommand = false;
   // Bytes sent after the reply: an over-long binary frame, or a second status line.
   Bytes trailer;
   // After the reply, send bytes that never form a line until the connection closes.
@@ -283,6 +286,8 @@ struct XbdmFault {
   static XbdmFault reply(Bytes raw);
   // A status line: statusLine("299- odd") sends "299- odd\r\n".
   static XbdmFault statusLine(std::string_view line);
+  // As statusLine, and the command is not carried out: refusal("414- access denied").
+  static XbdmFault refusal(std::string_view line);
   // A line of `length` characters (default: one past the client's 64 KiB cap).
   static XbdmFault oversizedLine(size_t length = 64 * 1024 + 1);
   static XbdmFault endlessLine();

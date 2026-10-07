@@ -1,4 +1,5 @@
 #include "cli/commands.hpp"
+#include "cli/interrupt.hpp"
 #include "cli/output.hpp"
 
 #include <spdlog/spdlog.h>
@@ -6,6 +7,7 @@
 #include <chrono>
 #include <format>
 #include <memory>
+#include <stop_token>
 
 namespace updclient::cli {
 
@@ -24,19 +26,26 @@ Outcome<void> runDiscover(Context &context, const std::string &protocol) {
 
   std::vector<discovery::DiscoveredDevice> found;
   std::vector<std::string> failures;
-  if (updserver) {
-    auto announced = discovery::DiscoveryRegistry::instance().discoverAll(timeout, false);
-    if (announced) found = std::move(*announced);
-    else failures.push_back("UpdServer: " + announced.error().message);
+  // Ctrl-C ends the search; what was found so far is still printed.
+  std::stop_source stop;
+  {
+    InterruptScope interrupt([&stop] { stop.request_stop(); });
+    if (updserver) {
+      auto announced = discovery::DiscoveryRegistry::instance().discoverAll(timeout, false, stop.get_token());
+      if (announced) found = std::move(*announced);
+      else failures.push_back("UpdServer: " + announced.error().message);
+    }
+    if (xbdmToo && !stop.stop_requested()) {
+      // Not in the process-wide registry: UpdServer auto-discovery would wait for it too.
+      xbdm::XbdmDiscovery provider;
+      auto answered = provider.discover(timeout, false, stop.get_token());
+      if (answered) found.insert(found.end(), answered->begin(), answered->end());
+      else failures.push_back("XBDM: " + answered.error().message);
+    }
   }
-  if (xbdmToo) {
-    // Not in the process-wide registry: UpdServer auto-discovery would wait for it too.
-    xbdm::XbdmDiscovery provider;
-    auto answered = provider.discover(timeout, false);
-    if (answered) found.insert(found.end(), answered->begin(), answered->end());
-    else failures.push_back("XBDM: " + answered.error().message);
-  }
-  if (found.empty() && !failures.empty() && failures.size() == static_cast<size_t>(updserver) + xbdmToo) {
+  const bool cancelled = stop.stop_requested();
+  if (!cancelled && found.empty() && !failures.empty() &&
+      failures.size() == static_cast<size_t>(updserver) + xbdmToo) {
     std::string reasons;
     for (const auto &f : failures) reasons += (reasons.empty() ? "" : "; ") + f;
     return failWith(kExitDiscovery, "DiscoveryFailed", "discovery is unavailable: " + reasons);
@@ -57,6 +66,10 @@ Outcome<void> runDiscover(Context &context, const std::string &protocol) {
   }
 
   context.output.result({{"devices", devices}}, text);
+  if (cancelled) {
+    return failWith(kExitRuntime, "Cancelled",
+                    "discovery was interrupted; " + std::to_string(found.size()) + " device(s) found until then");
+  }
   if (found.empty()) {
     spdlog::error("No devices answered within {} ms", timeout.count());
     context.exitCode = kExitDiscovery;

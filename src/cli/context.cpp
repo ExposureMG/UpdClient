@@ -1,11 +1,14 @@
 #include "cli/context.hpp"
 
+#include "cli/interrupt.hpp"
+
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <iostream>
+#include <stop_token>
 
 #if defined(_WIN32)
 #include <io.h>
@@ -35,6 +38,18 @@ std::string joinSchemes(const std::vector<std::string> &schemes) {
   std::string out;
   for (const auto &scheme : schemes) out += (out.empty() ? "" : ", ") + scheme;
   return out;
+}
+
+// info["port"] of a discovered device, when it is a valid port number.
+std::optional<uint16_t> discoveredPort(const discovery::DiscoveredDevice &device) {
+  auto it = device.info.find("port");
+  if (it == device.info.end()) return std::nullopt;
+  unsigned port = 0;
+  const auto [ptr, ec] = std::from_chars(it->second.data(), it->second.data() + it->second.size(), port);
+  if (ec != std::errc{} || ptr != it->second.data() + it->second.size() || port == 0 || port > 65535) {
+    return std::nullopt;
+  }
+  return static_cast<uint16_t>(port);
 }
 
 Outcome<void> checkSchemeRegistered(const net::Endpoint &endpoint) {
@@ -144,14 +159,7 @@ Outcome<net::Endpoint> Context::resolveUpdServerEndpoint() const {
     net::Endpoint endpoint;
     endpoint.scheme = "tcp";
     endpoint.host = device.address;
-    endpoint.port = updserver::NANDSVR_PORT;
-    if (auto it = device.info.find("port"); it != device.info.end()) {
-      unsigned port = 0;
-      const auto [ptr, ec] = std::from_chars(it->second.data(), it->second.data() + it->second.size(), port);
-      if (ec == std::errc{} && ptr == it->second.data() + it->second.size() && port > 0 && port <= 65535) {
-        endpoint.port = static_cast<uint16_t>(port);
-      }
-    }
+    endpoint.port = discoveredPort(device).value_or(updserver::NANDSVR_PORT);
     if (options.port) endpoint.port = *options.port;
     if (options.timeoutMs) endpoint.timeout = std::chrono::milliseconds(*options.timeoutMs);
     spdlog::info("Using discovered console at {}", endpoint.toString());
@@ -180,7 +188,13 @@ Outcome<net::Endpoint> Context::resolveXbdmEndpoint() const {
   spdlog::info("No target specified; looking for an XBDM console (UDP port {}, up to {} ms)...", xbdm::kXbdmPort,
                timeout.count());
   xbdm::XbdmDiscovery discovery;
-  auto found = discovery.discover(timeout, true);
+  std::stop_source stop;
+  Result<std::vector<discovery::DiscoveredDevice>> found;
+  {
+    InterruptScope interrupt([&stop] { stop.request_stop(); });
+    found = discovery.discover(timeout, true, stop.get_token());
+  }
+  if (stop.stop_requested()) return failWith(kExitRuntime, "Cancelled", "cancelled while looking for an XBDM console");
   if (!found) {
     return failWith(kExitDiscovery, "DiscoveryFailed",
                     "XBDM discovery is unavailable: " + found.error().message + "; pass --target xbdm://<address>");
@@ -193,7 +207,7 @@ Outcome<net::Endpoint> Context::resolveXbdmEndpoint() const {
   net::Endpoint endpoint;
   endpoint.scheme = "xbdm";
   endpoint.host = found->front().address;
-  endpoint.port = options.port.value_or(xbdm::kXbdmPort);
+  endpoint.port = options.port.value_or(discoveredPort(found->front()).value_or(xbdm::kXbdmPort));
   if (options.timeoutMs) endpoint.timeout = std::chrono::milliseconds(*options.timeoutMs);
   const auto name = found->front().info.find("name");
   spdlog::info("Using discovered console {} at {}", name != found->front().info.end() ? name->second : "",
@@ -227,7 +241,12 @@ void Context::finish(const Outcome<void> &outcome) {
   const Failure &failure = outcome.error();
   spdlog::error("{}: {}{}", failure.code, failure.message,
                 failure.sysError != 0 ? " (os error " + std::to_string(failure.sysError) + ")" : "");
-  output.error(failure.code, failure.message, failure.sysError, failure.consoleStatus);
+  if (failure.keptUpload) {
+    spdlog::warn("The upload is kept on the console as {}; rename it with 'xbdm mv'", *failure.keptUpload);
+  }
+  if (failure.delivery == "unknown") spdlog::warn("The console may have carried the command out; check before repeating it");
+  output.error(failure.code, failure.message, failure.sysError, failure.consoleStatus, failure.keptUpload,
+               failure.delivery);
   exitCode = failure.exitCode;
 }
 
