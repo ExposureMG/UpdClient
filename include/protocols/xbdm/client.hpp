@@ -222,6 +222,17 @@ struct RawAnswer {
   std::vector<std::string> body;
 };
 
+// How far a command line got (XbdmClient::lastDelivery). NotSent: no byte left the
+// client, so the console cannot have run it. PartlySent: part of the line was
+// written (some consoles end a line at CR, section 1.9); Sent: all of it. In both
+// cases the console may have carried it out. Answered: a status line was read.
+enum class Delivery { NotSent, PartlySent, Sent, Answered };
+
+struct CommandDelivery {
+  std::string command; // the command name ("delete", "rename", ...), never its arguments
+  Delivery delivery = Delivery::NotSent;
+};
+
 // (bytes done, bytes in total)
 using Progress = std::function<void(uint64_t, uint64_t)>;
 
@@ -361,6 +372,14 @@ public:
   void setOptions(const ClientOptions &options);
   // The status line of the last answer, if there was one.
   std::optional<StatusLine> lastStatus() const;
+  // The last command this client tried, internal ones included (the lookups and
+  // deletes of an upload, the steps of a rename, the cleanup of reconnect()), so for
+  // a call made of several commands it describes the last; nullopt before the
+  // first. After a failed call that changes something, NotSent means it is safe to
+  // repeat; PartlySent and Sent mean it may have happened. The messages of failed
+  // mkdir, delete, rename, setmem, setsystime, dvdeject and raw commands say the
+  // same in words.
+  std::optional<CommandDelivery> lastDelivery() const;
   // Temporary upload names left behind by aborted uploads, and by a sendfile whose
   // answer never arrived, deleted by reconnect().
   std::vector<std::string> pendingCleanup() const;
@@ -449,7 +468,8 @@ public:
   // getmemex: binary blocks; the bytes after an early last block are unreadable.
   Result<MemoryRead> getMemoryEx(uint32_t address, uint32_t length);
   // setmem in pieces of 64 bytes. A refusal (404 for unmapped memory) stops at that
-  // piece; the pieces before it were written.
+  // piece; the pieces before it were written, and the message says how many bytes
+  // that is. lastDelivery() describes the failing piece.
   Result<void> setMemory(uint32_t address, std::span<const uint8_t> data);
   Result<std::vector<MemoryRegion>> memoryRegions();
   Result<std::vector<Module>> modules();

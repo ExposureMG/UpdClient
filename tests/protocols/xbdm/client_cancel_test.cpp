@@ -556,3 +556,31 @@ TEST(XbdmCancel, CancelFromManyThreadsAtOnce) {
   CHECK(sawBlocked);
   CHECK_ERR(r, ErrorCode::Cancelled);
 }
+
+TEST(XbdmCancel, ACancelInTheMiddleOfALineIsPartlySent) {
+  auto pipe = ut::MemoryPipe::create(4);
+  const auto *probe = pipe.client.get();
+  std::atomic<bool> stop{false};
+  auto server = std::move(pipe.server);
+  std::thread console([&, end = server.get()] {
+    // The greeting in pieces the size of the pipe; then nothing is read.
+    if (!end->writeAll(ut::bytesOf("201- connected\r\n"))) return;
+    while (!stop) std::this_thread::sleep_for(1ms);
+  });
+  auto client = XbdmClient::attach(std::move(pipe.client), patientOptions());
+  REQUIRE_OK(client);
+  std::atomic<bool> sawBlocked{false};
+  auto canceller = cancelWhenBlocked(probe, 1, [&] { client->cancel(); }, sawBlocked);
+  auto r = client->removeFile("HDD:\\a rather long name.txt");
+  canceller.join();
+  stop = true;
+  server->close();
+  console.join();
+  CHECK(sawBlocked);
+  REQUIRE_ERR(r, ErrorCode::Cancelled);
+  auto delivery = client->lastDelivery();
+  REQUIRE(delivery.has_value());
+  CHECK_EQ(delivery->command, std::string("delete"));
+  CHECK(delivery->delivery == Delivery::PartlySent);
+  CHECK_MSG(r.error().message.find("may have carried it out") != std::string::npos, r.error().message);
+}

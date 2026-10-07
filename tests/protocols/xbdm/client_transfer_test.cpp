@@ -435,6 +435,31 @@ TEST(XbdmTransfer, AFailedRenameAfterTheOldFileWasDeletedKeepsTheUpload) {
   }
 }
 
+TEST(XbdmTransfer, ADeleteThatWasNeverSentDoesNotKeepTheUpload) {
+  Files fs;
+  fs.files["HDD:\\x.txt"] = ut::bytesOf("old");
+  auto console = FakeConsole::create();
+  console->handle([&fs](FakeConsole &c, const std::string &line) {
+    fs.serve(c, line);
+    // The connection drops before a byte of the next line, the delete, goes out.
+    if (line.rfind("getfileattributes ", 0) == 0) c.dropAfterWritten(c.written());
+  });
+  auto client = connected(console);
+  auto writer = client.openWrite("HDD:\\x.txt", 3);
+  REQUIRE_OK(writer);
+  const std::string temp = writer->temporaryPath();
+  REQUIRE_OK(writer->write(ut::bytesOf("new")));
+  auto r = writer->finish();
+  REQUIRE(!r);
+  CHECK_MSG(r.error().message.find("kept as") == std::string::npos, r.error().message);
+  auto delivery = client.lastDelivery();
+  REQUIRE(delivery.has_value());
+  CHECK_EQ(delivery->command, std::string("delete"));
+  CHECK(delivery->delivery == Delivery::NotSent);
+  CHECK_EQ(client.pendingCleanup(), std::vector<std::string>{temp});
+  CHECK_EQ(fs.files["HDD:\\x.txt"], ut::bytesOf("old"));
+}
+
 TEST(XbdmTransfer, UploadFindsTheFileToReplaceInTheListingWithoutGetfileattributes) {
   Files fs;
   fs.files["HDD:\\d\\x.txt"] = ut::bytesOf("old");

@@ -189,6 +189,11 @@ struct Session {
   bool transferActive = false;
   std::vector<std::string> pendingCleanup;
   std::optional<StatusLine> lastStatus;
+  // How far the last command line got; deliveries counts the commands begun, so a
+  // call can tell whether the delivery is its own.
+  std::optional<CommandDelivery> delivery;
+  uint64_t deliveries = 0;
+  bool awaitingAnswer = false;
 
   bool connected() const noexcept { return transport && transport->isOpen(); }
   size_t buffered() const noexcept { return buffer.size() - bufferPos; }
@@ -231,12 +236,14 @@ struct Session {
     buffer.clear();
     bufferPos = 0;
     deadline.reset();
+    awaitingAnswer = false;
     return installed;
   }
 
   // Closes the connection after a failure that leaves the stream position unknown.
   unexpected<Error> drop(Error error) {
     if (transport) transport->close();
+    awaitingAnswer = false;
     buffer.clear();
     bufferPos = 0;
     deadline.reset();
@@ -325,11 +332,31 @@ struct Session {
     }
   }
 
+  // A new command, named by the first word of its line, that has not left yet.
+  void beginCommand(std::string_view line) {
+    delivery = CommandDelivery{std::string(line.substr(0, line.find(' '))), Delivery::NotSent};
+    ++deliveries;
+    awaitingAnswer = false;
+  }
+
+  // Its own writeSome loop, with the idle timeout and command deadline of
+  // sendBytes, so that delivery knows whether part of the line went out.
   Result<void> sendLine(std::string_view line, std::string_view context) {
     std::string wire(line);
     wire += "\r\n";
     trace(TraceEvent::Sent, line);
-    return sendBytes(bytesOf(wire), options.idleTimeout, context);
+    const milliseconds idle = options.idleTimeout;
+    std::span<const uint8_t> rest = bytesOf(wire);
+    while (!rest.empty()) {
+      if (auto r = arm(idle, context); !r) return r;
+      auto n = transport->writeSome(rest);
+      if (!n) return transportFailure(n.error(), idle, context);
+      if (*n == 0) return dropWith(ErrorCode::Io, "write made no progress", context);
+      rest = rest.subspan(*n);
+      if (delivery) delivery->delivery = rest.empty() ? Delivery::Sent : Delivery::PartlySent;
+    }
+    awaitingAnswer = true;
+    return {};
   }
 
   // Appends what the transport has; 0 is end of stream.
@@ -408,6 +435,8 @@ struct Session {
       return dropWith(ErrorCode::Protocol, "malformed status line '" + preview(*line) + "'", context);
     }
     lastStatus = *status;
+    if (awaitingAnswer && delivery) delivery->delivery = Delivery::Answered;
+    awaitingAnswer = false;
     return *status;
   }
 
@@ -427,6 +456,7 @@ struct Session {
 
   Result<StatusLine> request(const std::string &line, std::initializer_list<int> accepted, std::string_view context,
                              milliseconds idle, bool internal = false) {
+    beginCommand(line);
     if (auto r = checkUsable(context, internal); !r) return unexpected<Error>(r.error());
     startDeadline();
     if (auto r = sendLine(line, context); !r) return unexpected<Error>(r.error());
@@ -650,6 +680,28 @@ std::string temporaryName(std::string_view finalName, std::string_view extension
 
 bool isRefusal(const Error &error) {
   return consoleStatusCode(error).has_value();
+}
+
+// For a failed call that changes something on the console: whether its command
+// (`command`, the last of the call's commands) can have been carried out, for the
+// humans who read the message. Refusals and failures before any command of the
+// call began are returned as they are.
+Error withDeliveryNote(const Session &s, uint64_t deliveriesBefore, std::string_view command, Error error) {
+  if (isRefusal(error) || s.deliveries == deliveriesBefore || !s.delivery) return error;
+  if (s.delivery->command != command || s.delivery->delivery == Delivery::NotSent) {
+    error.message += "; the command was not sent";
+  } else if (s.delivery->delivery != Delivery::Answered) {
+    error.message += "; the command was sent but not answered, so the console may have carried it out";
+  }
+  return error;
+}
+
+// Runs a mutating call and notes on a failure how far its command got.
+template <class Call> Result<void> mutating(Session &s, std::string_view command, Call &&call) {
+  const uint64_t before = s.deliveries;
+  Result<void> r = call();
+  if (!r) return unexpected<Error>(withDeliveryNote(s, before, command, r.error()));
+  return r;
 }
 
 // A command answered by 202 and a body, or by another accepted status whose text
@@ -1052,8 +1104,10 @@ Result<void> FileWriter::finish() {
     if (!line) return giveUp(line.error());
     auto removed = session.request(*line, {status::kOk}, "delete " + s.path);
     if (!removed) {
-      // Without an answer the delete may have happened.
-      if (!isRefusal(removed.error())) finalRemoved = "may have been deleted";
+      // Once any of its line went out without an answer, the delete may have happened.
+      if (!isRefusal(removed.error()) && session.delivery && session.delivery->delivery != Delivery::NotSent) {
+        finalRemoved = "may have been deleted";
+      }
       return giveUp(removed.error());
     }
     session.finishCommand();
@@ -1216,6 +1270,10 @@ std::optional<StatusLine> XbdmClient::lastStatus() const {
   return session_ ? session_->lastStatus : std::nullopt;
 }
 
+std::optional<CommandDelivery> XbdmClient::lastDelivery() const {
+  return session_ ? session_->delivery : std::nullopt;
+}
+
 std::vector<std::string> XbdmClient::pendingCleanup() const {
   return session_ ? session_->pendingCleanup : std::vector<std::string>{};
 }
@@ -1297,6 +1355,7 @@ Result<XbeInfo> xbeInfo(Session &s, Result<std::string> line, std::string_view c
 
 Result<PowerResult> power(Session &s, Result<std::string> line, std::string_view context) {
   if (!line) return unexpected<Error>(line.error());
+  s.beginCommand(*line);
   if (auto r = s.checkUsable(context, false); !r) return unexpected<Error>(r.error());
   s.startDeadline();
   if (auto r = s.sendLine(*line, context); !r) return unexpected<Error>(r.error());
@@ -1407,14 +1466,17 @@ Result<void> renameCase(Session &s, const std::string &source, const std::string
     return {};
   }
   Error error = second.error();
+  // Without an answer to a step, the file may be under either name.
+  bool certain = isRefusal(error);
   if (s.connected()) {
     auto restored = s.request(*back, {status::kOk}, "rename " + *intermediate);
     if (restored) {
       s.finishCommand();
       return unexpected<Error>(std::move(error));
     }
+    certain = certain && isRefusal(restored.error());
   }
-  error.message += "; the file is now named " + *intermediate;
+  error.message += (certain ? "; the file is now named " : "; the file may now be named ") + *intermediate;
   return unexpected<Error>(std::move(error));
 }
 
@@ -1572,9 +1634,11 @@ Result<void> XbdmClient::makeDirectory(const std::string &path) {
   if (!s) return unexpected<Error>(s.error());
   auto canonical = filePath(path);
   if (!canonical) return unexpected<Error>(canonical.error());
-  auto r = singleLine(**s, buildLine(Command("mkdir").text("name", *canonical), **s), "mkdir " + *canonical);
-  if (!r) return unexpected<Error>(r.error());
-  return {};
+  return mutating(**s, "mkdir", [&]() -> Result<void> {
+    auto r = singleLine(**s, buildLine(Command("mkdir").text("name", *canonical), **s), "mkdir " + *canonical);
+    if (!r) return unexpected<Error>(r.error());
+    return {};
+  });
 }
 
 Result<void> XbdmClient::removeFile(const std::string &path) {
@@ -1582,9 +1646,11 @@ Result<void> XbdmClient::removeFile(const std::string &path) {
   if (!s) return unexpected<Error>(s.error());
   auto canonical = filePath(path);
   if (!canonical) return unexpected<Error>(canonical.error());
-  auto r = singleLine(**s, buildLine(Command("delete").text("name", *canonical), **s), "delete " + *canonical);
-  if (!r) return unexpected<Error>(r.error());
-  return {};
+  return mutating(**s, "delete", [&]() -> Result<void> {
+    auto r = singleLine(**s, buildLine(Command("delete").text("name", *canonical), **s), "delete " + *canonical);
+    if (!r) return unexpected<Error>(r.error());
+    return {};
+  });
 }
 
 Result<void> XbdmClient::removeDirectory(const std::string &path) {
@@ -1592,10 +1658,12 @@ Result<void> XbdmClient::removeDirectory(const std::string &path) {
   if (!s) return unexpected<Error>(s.error());
   auto canonical = filePath(path);
   if (!canonical) return unexpected<Error>(canonical.error());
-  auto r = singleLine(**s, buildLine(Command("delete").text("name", *canonical).flag("dir"), **s),
-                      "delete " + *canonical);
-  if (!r) return unexpected<Error>(r.error());
-  return {};
+  return mutating(**s, "delete", [&]() -> Result<void> {
+    auto r = singleLine(**s, buildLine(Command("delete").text("name", *canonical).flag("dir"), **s),
+                        "delete " + *canonical);
+    if (!r) return unexpected<Error>(r.error());
+    return {};
+  });
 }
 
 Result<void> XbdmClient::rename(const std::string &from, const std::string &to) {
@@ -1610,15 +1678,17 @@ Result<void> XbdmClient::rename(const std::string &from, const std::string &to) 
   }
   auto line = buildLine(Command("rename").text("name", *source).text("newname", *target), **s);
   if (!line) return unexpected<Error>(line.error());
-  if (*source != *target && sameName(*source, *target)) return renameCase(**s, *source, *target, std::move(*line));
+  return mutating(**s, "rename", [&]() -> Result<void> {
+    if (*source != *target && sameName(*source, *target)) return renameCase(**s, *source, *target, std::move(*line));
 
-  auto existing = attributes(*target);
-  if (existing) return fail(ErrorCode::InvalidArgument, "rename: '" + *target + "' already exists");
-  if (!isRefusal(existing.error())) return unexpected<Error>(existing.error());
+    auto existing = attributes(*target);
+    if (existing) return fail(ErrorCode::InvalidArgument, "rename: '" + *target + "' already exists");
+    if (!isRefusal(existing.error())) return unexpected<Error>(existing.error());
 
-  auto r = singleLine(**s, std::move(line), "rename " + *source);
-  if (!r) return unexpected<Error>(r.error());
-  return {};
+    auto r = singleLine(**s, std::move(line), "rename " + *source);
+    if (!r) return unexpected<Error>(r.error());
+    return {};
+  });
 }
 
 Result<FileReader> XbdmClient::openRead(const std::string &path, std::optional<uint64_t> expectedSize) {
@@ -1790,9 +1860,11 @@ Result<PowerResult> XbdmClient::shutdown() {
 Result<void> XbdmClient::ejectTray() {
   auto s = sessionOf(session_);
   if (!s) return unexpected<Error>(s.error());
-  auto r = singleLine(**s, buildLine(Command("dvdeject"), **s), "dvdeject");
-  if (!r) return unexpected<Error>(r.error());
-  return {};
+  return mutating(**s, "dvdeject", [&]() -> Result<void> {
+    auto r = singleLine(**s, buildLine(Command("dvdeject"), **s), "dvdeject");
+    if (!r) return unexpected<Error>(r.error());
+    return {};
+  });
 }
 
 Result<Screenshot> XbdmClient::screenshot() {
@@ -1866,14 +1938,16 @@ Result<void> XbdmClient::setSystemTime(FileTimePoint time) {
 Result<void> XbdmClient::setSystemTimeRaw(uint64_t fileTime) {
   auto s = sessionOf(session_);
   if (!s) return unexpected<Error>(s.error());
-  auto r = singleLine(**s,
-                      buildLine(Command("setsystime")
-                                    .number("clockhi", fileTime >> 32)
-                                    .number("clocklo", fileTime & 0xFFFFFFFFull),
-                                **s),
-                      "setsystime");
-  if (!r) return unexpected<Error>(r.error());
-  return {};
+  return mutating(**s, "setsystime", [&]() -> Result<void> {
+    auto r = singleLine(**s,
+                        buildLine(Command("setsystime")
+                                      .number("clockhi", fileTime >> 32)
+                                      .number("clocklo", fileTime & 0xFFFFFFFFull),
+                                  **s),
+                        "setsystime");
+    if (!r) return unexpected<Error>(r.error());
+    return {};
+  });
 }
 
 Result<MemoryRead> XbdmClient::getMemory(uint32_t address, uint32_t length) {
@@ -1948,9 +2022,17 @@ Result<void> XbdmClient::setMemory(uint32_t address, std::span<const uint8_t> da
   for (size_t offset = 0; offset < data.size(); offset += kSetMemChunkBytes) {
     const auto piece = data.subspan(offset, std::min(kSetMemChunkBytes, data.size() - offset));
     const uint32_t at = address + static_cast<uint32_t>(offset);
-    auto r = singleLine(session, buildLine(Command("setmem").number("addr", at).raw("data", formatHex(piece)), session),
-                        "setmem " + formatNumber(at));
-    if (!r) return unexpected<Error>(r.error());
+    auto r = mutating(session, "setmem", [&]() -> Result<void> {
+      auto line = singleLine(session, buildLine(Command("setmem").number("addr", at).raw("data", formatHex(piece)), session),
+                             "setmem " + formatNumber(at));
+      if (!line) return unexpected<Error>(line.error());
+      return {};
+    });
+    if (!r) {
+      Error error = r.error();
+      if (offset > 0) error.message += "; the first " + std::to_string(offset) + " bytes were written";
+      return unexpected<Error>(std::move(error));
+    }
   }
   return {};
 }
@@ -2035,26 +2117,34 @@ Result<RawAnswer> XbdmClient::rawCommand(const std::string &line) {
     return fail(ErrorCode::LimitExceeded, "raw command: " + std::to_string(line.size() + 2) + " bytes exceed " +
                                               std::to_string(session.options.maxCommandBytes));
   }
-  if (auto r = session.checkUsable(context, false); !r) return unexpected<Error>(r.error());
-  session.startDeadline();
-  if (auto r = session.sendLine(line, context); !r) return unexpected<Error>(r.error());
-  auto status = session.readStatus(session.options.slowIdleTimeout, context);
-  if (!status) return unexpected<Error>(status.error());
-  RawAnswer answer{*status, {}};
-  if (status->code == status::kMultiline) {
-    auto body = session.readBodyLines(context);
-    if (!body) return unexpected<Error>(body.error());
-    answer.body = std::move(*body);
-    return answer;
+  const uint64_t before = session.deliveries;
+  auto answer = [&]() -> Result<RawAnswer> {
+    session.beginCommand(line);
+    if (auto r = session.checkUsable(context, false); !r) return unexpected<Error>(r.error());
+    session.startDeadline();
+    if (auto r = session.sendLine(line, context); !r) return unexpected<Error>(r.error());
+    auto status = session.readStatus(session.options.slowIdleTimeout, context);
+    if (!status) return unexpected<Error>(status.error());
+    RawAnswer answer{*status, {}};
+    if (status->code == status::kMultiline) {
+      auto body = session.readBodyLines(context);
+      if (!body) return unexpected<Error>(body.error());
+      answer.body = std::move(*body);
+      return answer;
+    }
+    if (status->isRefusal() || status->code == status::kOk || status->code == status::kConnected) {
+      session.finishCommand();
+      return answer;
+    }
+    return session.dropWith(ErrorCode::Unsupported,
+                            "answer '" + std::to_string(status->code) + "- " + detail::preview(status->text) +
+                                "' carries data a raw command cannot read; the connection was closed",
+                            context);
+  }();
+  if (!answer && session.delivery) {
+    return unexpected<Error>(withDeliveryNote(session, before, session.delivery->command, answer.error()));
   }
-  if (status->isRefusal() || status->code == status::kOk || status->code == status::kConnected) {
-    session.finishCommand();
-    return answer;
-  }
-  return session.dropWith(ErrorCode::Unsupported,
-                          "answer '" + std::to_string(status->code) + "- " + detail::preview(status->text) +
-                              "' carries data a raw command cannot read; the connection was closed",
-                          context);
+  return answer;
 }
 
 void registerXbdmScheme(net::TransportRegistry &registry) {

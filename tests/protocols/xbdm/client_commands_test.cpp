@@ -922,3 +922,91 @@ TEST(XbdmClient, XbdmSchemeDefaultsToPort730) {
   REQUIRE_OK(explicitPort);
   CHECK_EQ(registry.withDefaultPort(*explicitPort, 49).port, 731);
 }
+
+namespace {
+
+bool sameDelivery(const std::optional<CommandDelivery> &got, const std::string &command, Delivery delivery) {
+  return got && got->command == command && got->delivery == delivery;
+}
+
+} // namespace
+
+TEST(XbdmClient, LastDeliveryTellsHowFarAFailedCommandGot) {
+  {
+    auto console = FakeConsole::create();
+    auto client = connected(console);
+    CHECK(!client.lastDelivery().has_value());
+    client.close();
+    auto r = client.removeFile("HDD:\\a.txt");
+    REQUIRE_ERR(r, ErrorCode::NotConnected);
+    CHECK(sameDelivery(client.lastDelivery(), "delete", Delivery::NotSent));
+    CHECK_MSG(r.error().message.find("; the command was not sent") != std::string::npos, r.error().message);
+  }
+  {
+    auto console = FakeConsole::create();
+    console->handle([](FakeConsole &c, const std::string &) { c.hangUp(); });
+    auto client = connected(console);
+    auto r = client.removeFile("HDD:\\a.txt");
+    REQUIRE_ERR(r, ErrorCode::Disconnected);
+    CHECK(sameDelivery(client.lastDelivery(), "delete", Delivery::Sent));
+    CHECK_MSG(r.error().message.find("sent but not answered, so the console may have carried it out") !=
+                  std::string::npos,
+              r.error().message);
+  }
+  {
+    auto console = FakeConsole::create();
+    console->handle([](FakeConsole &, const std::string &) {});
+    auto client = connected(console);
+    auto r = client.removeFile("HDD:\\a.txt");
+    REQUIRE_ERR(r, ErrorCode::Timeout);
+    CHECK(sameDelivery(client.lastDelivery(), "delete", Delivery::Sent));
+  }
+  {
+    auto console = FakeConsole::create();
+    console->on("delete name=\"HDD:\\a.txt\"", "414- access denied\r\n");
+    auto client = connected(console);
+    auto r = client.removeFile("HDD:\\a.txt");
+    REQUIRE_ERR(r, ErrorCode::Io);
+    expectStatus(r.error(), 414);
+    CHECK(sameDelivery(client.lastDelivery(), "delete", Delivery::Answered));
+    CHECK_MSG(r.error().message.find("the command was") == std::string::npos, r.error().message);
+  }
+  {
+    auto console = FakeConsole::create();
+    console->on("delete name=\"HDD:\\a.txt\"", "200- OK\r\n");
+    auto client = connected(console);
+    REQUIRE_OK(client.removeFile("HDD:\\a.txt"));
+    CHECK(sameDelivery(client.lastDelivery(), "delete", Delivery::Answered));
+    // A call refused before any command keeps the last delivery.
+    CHECK_ERR(client.removeFile("HDD:"), ErrorCode::InvalidArgument);
+    CHECK(sameDelivery(client.lastDelivery(), "delete", Delivery::Answered));
+  }
+}
+
+TEST(XbdmClient, ARenameWhoseCheckFailsWasNotSent) {
+  auto console = FakeConsole::create();
+  console->handle([](FakeConsole &c, const std::string &) { c.hangUp(); });
+  auto client = connected(console);
+  auto r = client.rename("HDD:\\a.txt", "HDD:\\b.txt");
+  REQUIRE_ERR(r, ErrorCode::Disconnected);
+  CHECK(sameDelivery(client.lastDelivery(), "getfileattributes", Delivery::Sent));
+  CHECK_MSG(r.error().message.find("; the command was not sent") != std::string::npos, r.error().message);
+}
+
+TEST(XbdmClient, SetMemorySaysHowMuchWasWrittenBeforeAFailure) {
+  auto console = FakeConsole::create();
+  console->handle([](FakeConsole &c, const std::string &) {
+    if (c.commands().size() == 3) {
+      c.hangUp();
+      return;
+    }
+    c.line("200- set");
+  });
+  auto client = connected(console);
+  const ut::Bytes data(200, 0xAB);
+  auto r = client.setMemory(0x82000000u, data);
+  REQUIRE_ERR(r, ErrorCode::Disconnected);
+  CHECK_EQ(console->commands().size(), size_t{3});
+  CHECK_MSG(r.error().message.find("the first 128 bytes were written") != std::string::npos, r.error().message);
+  CHECK(sameDelivery(client.lastDelivery(), "setmem", Delivery::Sent));
+}
