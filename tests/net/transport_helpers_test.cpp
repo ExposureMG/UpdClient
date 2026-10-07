@@ -1,7 +1,7 @@
 #include "support/mock_transport.hpp"
 #include "support/test_harness.hpp"
 
-#include <updclient/net/transport.hpp>
+#include <net/transport.hpp>
 
 #include <limits>
 

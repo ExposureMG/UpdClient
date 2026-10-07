@@ -2,9 +2,9 @@
 #include "support/test_harness.hpp"
 #include "support/test_util.hpp"
 
-#include <updclient/core/path.hpp>
-#include <updclient/net/transport_registry.hpp>
-#include <updclient/protocols/updserver/client.hpp>
+#include <core/path.hpp>
+#include <net/transport_registry.hpp>
+#include <protocols/updserver/client.hpp>
 
 #include <cstddef>
 #include <cstring>

@@ -4,9 +4,9 @@
 #include "support/test_util.hpp"
 #include "support/xbdm_mock_server.hpp"
 
-#include <updclient/net/endpoint.hpp>
-#include <updclient/net/tcp_transport.hpp>
-#include <updclient/protocols/xbdm/client.hpp>
+#include <net/endpoint.hpp>
+#include <net/tcp_transport.hpp>
+#include <protocols/xbdm/client.hpp>
 
 #include <chrono>
 #include <memory>

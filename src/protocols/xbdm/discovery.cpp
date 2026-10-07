@@ -1,6 +1,6 @@
-#include <updclient/protocols/xbdm/discovery.hpp>
+#include <protocols/xbdm/discovery.hpp>
 
-#include <updclient/net/udp_socket.hpp>
+#include <net/udp_socket.hpp>
 
 #include "net/deadline.hpp"
 

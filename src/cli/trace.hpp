@@ -2,7 +2,7 @@
 
 #include "cli/context.hpp"
 
-#include <updclient/protocols/xbdm/client.hpp>
+#include <protocols/xbdm/client.hpp>
 
 #include <chrono>
 #include <cstdint>

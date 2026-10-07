@@ -1,7 +1,7 @@
 #pragma once
 
-#include <updclient/core/error.hpp>
-#include <updclient/core/export.hpp>
+#include <core/error.hpp>
+#include <core/export.hpp>
 
 #include <chrono>
 #include <cstddef>
@@ -132,24 +132,10 @@ inline constexpr uint64_t joinHalves(uint32_t hi, uint32_t lo) noexcept {
 }
 
 // nullopt for the few FILETIMEs past the end of the tick range.
-inline std::optional<FileTimePoint> fileTimeToTimePoint(uint64_t fileTime) noexcept {
-  constexpr uint64_t kMaxTicks = static_cast<uint64_t>((std::numeric_limits<int64_t>::max)());
-  if (fileTime >= kFileTimeUnixEpoch) {
-    const uint64_t ticks = fileTime - kFileTimeUnixEpoch;
-    if (ticks > kMaxTicks) return std::nullopt;
-    return FileTimePoint(FileTimeTicks(static_cast<int64_t>(ticks)));
-  }
-  return FileTimePoint(FileTimeTicks(-static_cast<int64_t>(kFileTimeUnixEpoch - fileTime)));
-}
+UPDCLIENT_API std::optional<FileTimePoint> fileTimeToTimePoint(uint64_t fileTime) noexcept;
 
 // nullopt before 1601-01-01.
-inline std::optional<uint64_t> timePointToFileTime(FileTimePoint time) noexcept {
-  const int64_t ticks = time.time_since_epoch().count();
-  if (ticks >= 0) return kFileTimeUnixEpoch + static_cast<uint64_t>(ticks);
-  const uint64_t before = uint64_t{0} - static_cast<uint64_t>(ticks);
-  if (before > kFileTimeUnixEpoch) return std::nullopt;
-  return kFileTimeUnixEpoch - before;
-}
+UPDCLIENT_API std::optional<uint64_t> timePointToFileTime(FileTimePoint time) noexcept;
 
 // UDP name protocol on port 730 (section 2.1): one datagram each.
 inline constexpr uint8_t kNameLookup = 1;   // client: 01, length, name

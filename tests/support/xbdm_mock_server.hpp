@@ -11,9 +11,9 @@
 // Every public member is thread-safe. Each connection is served on its own thread;
 // stop() (or the destructor) closes all of them and joins the threads.
 
-#include <updclient/core/error.hpp>
-#include <updclient/net/datagram.hpp>
-#include <updclient/net/transport.hpp>
+#include <core/error.hpp>
+#include <net/datagram.hpp>
+#include <net/transport.hpp>
 
 #include "support/test_util.hpp"
 

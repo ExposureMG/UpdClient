@@ -1,9 +1,9 @@
 #pragma once
 
-#include <updclient/core/export.hpp>
-#include <updclient/discovery/discovery.hpp>
-#include <updclient/net/datagram.hpp>
-#include <updclient/protocols/updserver/protocol.hpp>
+#include <core/export.hpp>
+#include <discovery/discovery.hpp>
+#include <net/datagram.hpp>
+#include <protocols/updserver/protocol.hpp>
 
 #include <chrono>
 #include <string>

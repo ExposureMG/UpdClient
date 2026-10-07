@@ -2,7 +2,7 @@
 
 #include "cli/output.hpp"
 
-#include <updclient/updclient.hpp>
+#include <updclient.hpp>
 
 #include <cstdint>
 #include <optional>

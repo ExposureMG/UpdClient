@@ -1,8 +1,28 @@
-#include <updclient/protocols/xbdm/protocol.hpp>
+#include <protocols/xbdm/protocol.hpp>
 
 #include <cctype>
 
 namespace updclient::xbdm {
+
+// nullopt for the few FILETIMEs past the end of the tick range.
+std::optional<FileTimePoint> fileTimeToTimePoint(uint64_t fileTime) noexcept {
+  constexpr uint64_t kMaxTicks = static_cast<uint64_t>((std::numeric_limits<int64_t>::max)());
+  if (fileTime >= kFileTimeUnixEpoch) {
+    const uint64_t ticks = fileTime - kFileTimeUnixEpoch;
+    if (ticks > kMaxTicks) return std::nullopt;
+    return FileTimePoint(FileTimeTicks(static_cast<int64_t>(ticks)));
+  }
+  return FileTimePoint(FileTimeTicks(-static_cast<int64_t>(kFileTimeUnixEpoch - fileTime)));
+}
+
+// nullopt before 1601-01-01.
+std::optional<uint64_t> timePointToFileTime(FileTimePoint time) noexcept {
+  const int64_t ticks = time.time_since_epoch().count();
+  if (ticks >= 0) return kFileTimeUnixEpoch + static_cast<uint64_t>(ticks);
+  const uint64_t before = uint64_t{0} - static_cast<uint64_t>(ticks);
+  if (before > kFileTimeUnixEpoch) return std::nullopt;
+  return kFileTimeUnixEpoch - before;
+}
 
 namespace {
 

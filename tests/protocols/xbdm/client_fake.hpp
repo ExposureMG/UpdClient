@@ -1,8 +1,8 @@
 #pragma once
 
-#include <updclient/core/error.hpp>
-#include <updclient/net/transport.hpp>
-#include <updclient/protocols/xbdm/client.hpp>
+#include <core/error.hpp>
+#include <net/transport.hpp>
+#include <protocols/xbdm/client.hpp>
 
 #include "support/test_util.hpp"
 

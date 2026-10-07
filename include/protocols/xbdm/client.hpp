@@ -1,13 +1,13 @@
 #pragma once
 
-#include <updclient/core/error.hpp>
-#include <updclient/core/export.hpp>
-#include <updclient/core/path.hpp>
-#include <updclient/net/endpoint.hpp>
-#include <updclient/net/transport.hpp>
-#include <updclient/net/transport_registry.hpp>
-#include <updclient/protocols/xbdm/path.hpp>
-#include <updclient/protocols/xbdm/protocol.hpp>
+#include <core/error.hpp>
+#include <core/export.hpp>
+#include <core/path.hpp>
+#include <net/endpoint.hpp>
+#include <net/transport.hpp>
+#include <net/transport_registry.hpp>
+#include <protocols/xbdm/path.hpp>
+#include <protocols/xbdm/protocol.hpp>
 
 #include <chrono>
 #include <cstddef>

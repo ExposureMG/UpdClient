@@ -3,8 +3,8 @@
 #include "support/test_harness.hpp"
 #include "support/test_util.hpp"
 
-#include <updclient/protocols/xbdm/client.hpp>
-#include <updclient/protocols/xbdm/protocol.hpp>
+#include <protocols/xbdm/client.hpp>
+#include <protocols/xbdm/protocol.hpp>
 
 #include <cstdint>
 #include <filesystem>

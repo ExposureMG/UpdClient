@@ -2,7 +2,7 @@
 #include "support/test_harness.hpp"
 #include "support/test_util.hpp"
 
-#include <updclient/net/udp_socket.hpp>
+#include <net/udp_socket.hpp>
 
 #include <chrono>
 #include <thread>

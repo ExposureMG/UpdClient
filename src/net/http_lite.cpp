@@ -1,6 +1,6 @@
-#include <updclient/net/http_lite.hpp>
+#include <net/http_lite.hpp>
 
-#include <updclient/core/path.hpp>
+#include <core/path.hpp>
 
 #include <array>
 #include <charconv>

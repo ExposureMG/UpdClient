@@ -2,7 +2,7 @@
 #include "support/test_harness.hpp"
 #include "support/test_util.hpp"
 
-#include <updclient/net/http_lite.hpp>
+#include <net/http_lite.hpp>
 
 #include <string>
 

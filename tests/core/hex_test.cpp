@@ -1,7 +1,7 @@
 #include "support/test_harness.hpp"
 #include "support/test_util.hpp"
 
-#include <updclient/core/hex.hpp>
+#include <core/hex.hpp>
 
 #include <array>
 

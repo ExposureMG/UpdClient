@@ -1,6 +1,6 @@
-#include <updclient/protocols/updserver/client.hpp>
+#include <protocols/updserver/client.hpp>
 
-#include <updclient/net/transport_registry.hpp>
+#include <net/transport_registry.hpp>
 
 #include <spdlog/spdlog.h>
 

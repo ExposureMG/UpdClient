@@ -4,7 +4,7 @@
 #include "support/test_harness.hpp"
 #include "support/test_util.hpp"
 
-#include <updclient/net/tcp_transport.hpp>
+#include <net/tcp_transport.hpp>
 
 #include <atomic>
 #include <chrono>

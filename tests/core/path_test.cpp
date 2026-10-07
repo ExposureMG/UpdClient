@@ -1,6 +1,6 @@
 #include "support/test_harness.hpp"
 
-#include <updclient/core/path.hpp>
+#include <core/path.hpp>
 
 using namespace updclient;
 

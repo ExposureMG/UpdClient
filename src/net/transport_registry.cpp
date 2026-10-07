@@ -1,4 +1,4 @@
-#include <updclient/net/transport_registry.hpp>
+#include <net/transport_registry.hpp>
 
 #include <algorithm>
 #include <cctype>

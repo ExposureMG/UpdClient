@@ -1,7 +1,7 @@
-#include <updclient/protocols/xbdm/client.hpp>
+#include <protocols/xbdm/client.hpp>
 
-#include <updclient/core/hex.hpp>
-#include <updclient/net/tcp_transport.hpp>
+#include <core/hex.hpp>
+#include <net/tcp_transport.hpp>
 
 #include "net/deadline.hpp"
 

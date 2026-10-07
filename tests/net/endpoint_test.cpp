@@ -1,6 +1,6 @@
 #include "support/test_harness.hpp"
 
-#include <updclient/net/endpoint.hpp>
+#include <net/endpoint.hpp>
 
 using namespace updclient;
 using updclient::net::Endpoint;

@@ -1,6 +1,6 @@
 #include "support/test_harness.hpp"
 
-#include <updclient/protocols/xbdm/path.hpp>
+#include <protocols/xbdm/path.hpp>
 
 #include <string>
 #include <vector>

@@ -1,7 +1,7 @@
 #include "support/test_harness.hpp"
 #include "support/xbdm_mock_server.hpp"
 
-#include <updclient/net/tcp_transport.hpp>
+#include <net/tcp_transport.hpp>
 
 #include <chrono>
 #include <string>

@@ -1,4 +1,4 @@
-#include <updclient/discovery/discovery.hpp>
+#include <discovery/discovery.hpp>
 
 #include <spdlog/spdlog.h>
 

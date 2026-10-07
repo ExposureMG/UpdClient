@@ -1,5 +1,7 @@
 #pragma once
 
+#include <core/export.hpp>
+
 #include <bit>
 #include <concepts>
 #include <cstddef>
@@ -149,17 +151,6 @@ constexpr uint32_t loadBe32(const uint8_t *p) noexcept {
   return (uint32_t{p[0]} << 24) | (uint32_t{p[1]} << 16) | (uint32_t{p[2]} << 8) | p[3];
 }
 
-inline NandInfo swapNandInfo(const NandInfo &in) noexcept {
-  NandInfo out = in;
-  out.structVer = swapBe(in.structVer);
-  out.kernelVer = swapBe(in.kernelVer);
-  out.optFlag = swapBe(in.optFlag);
-  out.useFlags = swapBe(in.useFlags);
-  out.hwFlags = swapBe(in.hwFlags);
-  out.dumpSize = swapBe(in.dumpSize);
-  out.blockSize = swapBe(in.blockSize);
-  out.pairing = swapBe(in.pairing);
-  return out;
-}
+UPDCLIENT_API NandInfo swapNandInfo(const NandInfo &in) noexcept;
 
 } // namespace updclient::updserver

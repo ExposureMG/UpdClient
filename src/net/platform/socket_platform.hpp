@@ -3,7 +3,7 @@
 // Private to the library: never include from anything under include/.
 // All Winsock / BSD socket differences are confined to this header and its .cpp.
 
-#include <updclient/core/error.hpp>
+#include <core/error.hpp>
 
 #include <chrono>
 #include <cstddef>

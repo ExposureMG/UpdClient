@@ -2,9 +2,9 @@
 #include "support/test_harness.hpp"
 #include "support/test_util.hpp"
 
-#include <updclient/core/hex.hpp>
-#include <updclient/net/transport_registry.hpp>
-#include <updclient/protocols/xell/client.hpp>
+#include <core/hex.hpp>
+#include <net/transport_registry.hpp>
+#include <protocols/xell/client.hpp>
 
 #include <array>
 #include <memory>

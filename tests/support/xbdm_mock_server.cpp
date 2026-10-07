@@ -3,7 +3,7 @@
 #include "support/loopback_server.hpp"
 #include "support/memory_transport.hpp"
 
-#include <updclient/net/udp_socket.hpp>
+#include <net/udp_socket.hpp>
 
 #if !defined(_WIN32)
 #include <netinet/tcp.h>

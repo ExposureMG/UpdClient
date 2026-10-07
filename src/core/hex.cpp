@@ -1,4 +1,4 @@
-#include <updclient/core/hex.hpp>
+#include <core/hex.hpp>
 
 namespace updclient {
 

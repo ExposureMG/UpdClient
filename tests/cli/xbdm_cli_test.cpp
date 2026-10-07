@@ -1,6 +1,6 @@
 #include "protocols/xbdm/integration_support.hpp"
 
-#include <updclient/core/hex.hpp>
+#include <core/hex.hpp>
 
 #include <chrono>
 #include <cstdlib>

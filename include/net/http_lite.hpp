@@ -1,8 +1,8 @@
 #pragma once
 
-#include <updclient/core/error.hpp>
-#include <updclient/core/export.hpp>
-#include <updclient/net/transport.hpp>
+#include <core/error.hpp>
+#include <core/export.hpp>
+#include <net/transport.hpp>
 
 #include <algorithm>
 #include <cstddef>

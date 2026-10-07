@@ -1,9 +1,9 @@
 #include "protocols/xbdm/integration_support.hpp"
 #include "support/loopback_server.hpp"
 
-#include <updclient/discovery/discovery.hpp>
-#include <updclient/net/transport_registry.hpp>
-#include <updclient/protocols/xbdm/discovery.hpp>
+#include <discovery/discovery.hpp>
+#include <net/transport_registry.hpp>
+#include <protocols/xbdm/discovery.hpp>
 
 // XbdmDiscovery against the mock's name responder (section 2): in memory through
 // the mock's datagram sockets, and over real UDP on loopback.

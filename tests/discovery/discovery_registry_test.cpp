@@ -1,7 +1,7 @@
 #include "support/test_harness.hpp"
 
-#include <updclient/discovery/discovery.hpp>
-#include <updclient/updclient.hpp>
+#include <discovery/discovery.hpp>
+#include <updclient.hpp>
 
 #include <algorithm>
 #include <atomic>

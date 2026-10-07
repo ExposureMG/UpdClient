@@ -2,7 +2,7 @@
 
 #include "cli/context.hpp"
 
-#include <updclient/updclient.hpp>
+#include <updclient.hpp>
 
 #include <functional>
 #include <string>

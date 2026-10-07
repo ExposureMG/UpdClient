@@ -1,4 +1,4 @@
-#include <updclient/net/datagram.hpp>
+#include <net/datagram.hpp>
 
 namespace updclient::net {
 

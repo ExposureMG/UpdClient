@@ -1,7 +1,7 @@
 #include "support/test_harness.hpp"
 
-#include <updclient/core/error.hpp>
-#include <updclient/core/expected.hpp>
+#include <core/error.hpp>
+#include <core/expected.hpp>
 
 #include <memory>
 #include <string>

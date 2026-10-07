@@ -1,7 +1,7 @@
 #pragma once
 
-#include <updclient/core/export.hpp>
-#include <updclient/net/datagram.hpp>
+#include <core/export.hpp>
+#include <net/datagram.hpp>
 
 #include <memory>
 

@@ -1,4 +1,4 @@
-#include <updclient/net/udp_socket.hpp>
+#include <net/udp_socket.hpp>
 
 #include "net/platform/socket_platform.hpp"
 

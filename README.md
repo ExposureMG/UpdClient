@@ -166,7 +166,7 @@ directory), configuration stops with a message that names the missing variable.
 cmake --install build --prefix /usr/local
 ```
 
-installs the library, the public headers under `include/updclient/`, the `updclient` binary and the
+installs the library, the public headers under `include/`, the `updclient` binary and the
 CMake package files; a spdlog or tl-expected that was fetched is installed into the same prefix, an
 installed one is looked up again. A consumer then uses `find_package(UpdClient)` and links
 `UpdClient::updclient_lib`; the package needs `tl-expected` (and `spdlog` for a static build) to be
@@ -211,7 +211,7 @@ target_link_libraries(my_app PRIVATE UpdClient::updclient_lib)
 ```
 
 ```cpp
-#include <updclient/updclient.hpp>
+#include <updclient.hpp>
 
 #include <iostream>
 #include <span>
@@ -261,7 +261,7 @@ int main() {
 XBDM keeps one connection per client and answers every command:
 
 ```cpp
-#include <updclient/updclient.hpp>
+#include <updclient.hpp>
 
 #include <iostream>
 
@@ -315,18 +315,18 @@ Things to know:
   that implements `net::ITransport` can carry either protocol.
 - Many UpdServer commands (reboot, poke, writeBlock, eraseBlock, sendFile, ...) are not acknowledged
   by the console, so a successful `Result<void>` only means the bytes were sent. See the comments in
-  `include/updclient/protocols/updserver/client.hpp` for the full list and for the rule that a failure
+  `include/protocols/updserver/client.hpp` for the full list and for the rule that a failure
   mid-exchange closes the connection (`isConnected()` turns false; reconnect).
 - Sizes announced by a peer are bounded by `updserver::ClientLimits`; exceeding one gives
   `ErrorCode::LimitExceeded`.
 - Downloads (`getFile`, `dumpFlash`, `XellClient::dumpFlash`) go to `<path>.part` or a temporary file
   next to the destination and are renamed only when complete.
 - Local files are `std::filesystem::path` everywhere. Text that is UTF-8 (command line, JSON, messages)
-  converts with `pathFromUtf8` / `pathToUtf8` from `updclient/core/path.hpp`, because on Windows a
+  converts with `pathFromUtf8` / `pathToUtf8` from `core/path.hpp`, because on Windows a
   `std::string` path is read in the ANSI code page.
 - Discovery: `discovery::DiscoveryRegistry::instance().discoverAll(std::chrono::seconds(3))` returns
   the `DiscoveredDevice` list from every registered provider.
-- XBDM (`include/updclient/protocols/xbdm/client.hpp`): a 4xx answer is an error that carries the status
+- XBDM (`include/protocols/xbdm/client.hpp`): a 4xx answer is an error that carries the status
   (`xbdm::consoleStatusCode(error)`) and leaves the connection usable; any other failure (timeout,
   malformed answer, drop, `cancel()`) closes it, and the client never reconnects on its own: call
   `reconnect()`, which also deletes temporary files left by interrupted uploads. While a `FileReader` or
@@ -492,7 +492,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the layering and dependency
 provider or a CLI command, plus known limitations and the roadmap.
 
 ```
-include/updclient/   public headers, included as <updclient/...>
+include/   public headers, included as <...>
 src/                 library sources mirroring include/, plus the private socket layer
 src/cli/, src/main.cpp   the command line tool
 tests/               test suite and fakes

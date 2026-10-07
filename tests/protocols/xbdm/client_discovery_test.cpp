@@ -2,8 +2,8 @@
 #include "support/test_harness.hpp"
 #include "support/test_util.hpp"
 
-#include <updclient/net/transport_registry.hpp>
-#include <updclient/protocols/xbdm/discovery.hpp>
+#include <net/transport_registry.hpp>
+#include <protocols/xbdm/discovery.hpp>
 
 #include <chrono>
 #include <deque>

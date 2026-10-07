@@ -1,7 +1,7 @@
 #pragma once
 
-#include <updclient/core/error.hpp>
-#include <updclient/core/export.hpp>
+#include <core/error.hpp>
+#include <core/export.hpp>
 
 #include <cstdint>
 #include <span>

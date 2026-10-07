@@ -1,6 +1,6 @@
 #include "support/test_harness.hpp"
 
-#include <updclient/core/error.hpp>
+#include <core/error.hpp>
 
 #include <set>
 

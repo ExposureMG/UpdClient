@@ -1,6 +1,6 @@
 #include "protocols/xbdm/integration_support.hpp"
 
-#include <updclient/protocols/xbdm/path.hpp>
+#include <protocols/xbdm/path.hpp>
 
 #include <algorithm>
 #include <atomic>

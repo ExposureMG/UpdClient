@@ -4,16 +4,16 @@ Three things vary independently, and each has its own extension point:
 
 | To add | Implement | Registered with | Files |
 | --- | --- | --- | --- |
-| A transport (serial, USB, TLS, ...) | `net::ITransport` | `net::TransportRegistry`, by URI scheme | `include/updclient/net/<name>_transport.hpp`, `src/net/<name>_transport.cpp` |
-| A protocol client | a class that takes a `net::TransportPtr` | nothing: callers construct it | `include/updclient/protocols/<name>/client.hpp`, `src/protocols/<name>/client.cpp` |
-| A discovery provider | `discovery::IDiscoveryProvider` | `discovery::DiscoveryRegistry`, by name | `include/updclient/protocols/<name>/discovery.hpp`, `src/protocols/<name>/discovery.cpp` |
+| A transport (serial, USB, TLS, ...) | `net::ITransport` | `net::TransportRegistry`, by URI scheme | `include/net/<name>_transport.hpp`, `src/net/<name>_transport.cpp` |
+| A protocol client | a class that takes a `net::TransportPtr` | nothing: callers construct it | `include/protocols/<name>/client.hpp`, `src/protocols/<name>/client.cpp` |
+| A discovery provider | `discovery::IDiscoveryProvider` | `discovery::DiscoveryRegistry`, by name | `include/protocols/<name>/discovery.hpp`, `src/protocols/<name>/discovery.cpp` |
 
 Sources under `src/` are globbed by CMake (`CONFIGURE_DEPENDS`), so a new `.cpp` needs no CMake edit; re-run
 CMake once if a build directory already exists. Tests under `tests/` are globbed the same way. A new
 dependency (a TLS or USB library) is the exception: link it in `CMakeLists.txt`.
 
 Read [ARCHITECTURE.md](ARCHITECTURE.md) first for the dependency rules. In short: headers under `include/`
-include only `<updclient/...>` and the standard library, never OS socket headers or spdlog; spdlog and
+include only `<...>` and the standard library, never OS socket headers or spdlog; spdlog and
 platform code live in `.cpp` files and private headers under `src/`; protocols never include each other.
 
 The examples below use made-up names (`serial`, `acme`). The transport, client and discovery examples
@@ -58,15 +58,15 @@ Contract:
 
 ### Step 1: the public header
 
-`include/updclient/net/serial_transport.hpp`
+`include/net/serial_transport.hpp`
 
 ```cpp
 #pragma once
 
-#include <updclient/core/export.hpp>
-#include <updclient/net/endpoint.hpp>
-#include <updclient/net/transport.hpp>
-#include <updclient/net/transport_registry.hpp>
+#include <core/export.hpp>
+#include <net/endpoint.hpp>
+#include <net/transport.hpp>
+#include <net/transport_registry.hpp>
 
 #include <memory>
 #include <string>
@@ -115,7 +115,7 @@ Everything that differs per operating system goes behind a private header next t
 // Private to the library. Wraps the operating system's serial API (termios on
 // POSIX, CreateFile/SetCommState on Windows); nothing outside src/ includes it.
 
-#include <updclient/core/error.hpp>
+#include <core/error.hpp>
 
 #include <chrono>
 #include <cstddef>
@@ -162,7 +162,7 @@ given platform.
 `src/net/serial_transport.cpp`
 
 ```cpp
-#include <updclient/net/serial_transport.hpp>
+#include <net/serial_transport.hpp>
 
 #include "net/serial/serial_port.hpp"
 
@@ -250,10 +250,10 @@ auto client = updclient::updserver::UpdServerClient::connect(*endpoint);  // run
 Nothing in `UpdServerClient`, `XellClient` or `http_lite` changes: they only see an `ITransport`.
 
 To make the CLI accept `--target serial:///dev/ttyUSB0`, add one line after `registerBuiltins();` in
-`src/cli/app.cpp` (and `#include <updclient/net/serial_transport.hpp>`). The CLI rejects schemes that
+`src/cli/app.cpp` (and `#include <net/serial_transport.hpp>`). The CLI rejects schemes that
 are not registered, listing the ones that are. To make it a built-in for every user of the library, put
 the same call inside the `std::call_once` lambda in `src/updclient.cpp` and add the header to
-`include/updclient/updclient.hpp`.
+`include/updclient.hpp`.
 
 ### Step 5: tests
 
@@ -263,8 +263,8 @@ Real hardware is not needed to test argument handling and registration.
 ```cpp
 #include "support/test_harness.hpp"
 
-#include <updclient/net/serial_transport.hpp>
-#include <updclient/net/transport_registry.hpp>
+#include <net/serial_transport.hpp>
+#include <net/transport_registry.hpp>
 
 using namespace updclient;
 
@@ -290,15 +290,15 @@ mark such tests with `SKIP("no device")` when the device is absent.
 A protocol client takes its byte stream by injection and never constructs a socket. This one speaks an
 invented protocol: the line `STATUS\n` is answered by a big-endian 32-bit word.
 
-`include/updclient/protocols/acme/client.hpp`
+`include/protocols/acme/client.hpp`
 
 ```cpp
 #pragma once
 
-#include <updclient/core/error.hpp>
-#include <updclient/core/export.hpp>
-#include <updclient/net/endpoint.hpp>
-#include <updclient/net/transport.hpp>
+#include <core/error.hpp>
+#include <core/export.hpp>
+#include <net/endpoint.hpp>
+#include <net/transport.hpp>
 
 #include <cstdint>
 #include <string>
@@ -337,9 +337,9 @@ private:
 `src/protocols/acme/client.cpp`
 
 ```cpp
-#include <updclient/protocols/acme/client.hpp>
+#include <protocols/acme/client.hpp>
 
-#include <updclient/net/transport_registry.hpp>
+#include <net/transport_registry.hpp>
 
 #include <spdlog/spdlog.h>
 
@@ -405,7 +405,7 @@ Guidelines taken from `UpdServerClient`:
   connection usable.
 - State plainly in the header which commands the device does not acknowledge.
 - Keep wire constants and packed structures in `protocol.hpp`, with no I/O, as
-  `include/updclient/protocols/updserver/protocol.hpp` does, and `static_assert` their sizes.
+  `include/protocols/updserver/protocol.hpp` does, and `static_assert` their sizes.
 - Do not include another protocol's headers. Shared code belongs in `core/` or `net/`.
 - Write downloads to a temporary file and rename on success (see `UpdServerClient::getFile`).
 
@@ -414,8 +414,8 @@ instead of a transport and open one per request. `XellClient` does exactly this;
 `net/http_lite.hpp`:
 
 ```cpp
-#include <updclient/net/http_lite.hpp>
-#include <updclient/net/transport.hpp>
+#include <net/http_lite.hpp>
+#include <net/transport.hpp>
 
 #include <functional>
 #include <string>
@@ -439,7 +439,7 @@ Tests use `ut::MockScript` to script the device. `tests/protocols/acme/client_te
 #include "support/mock_transport.hpp"
 #include "support/test_harness.hpp"
 
-#include <updclient/protocols/acme/client.hpp>
+#include <protocols/acme/client.hpp>
 
 using namespace updclient;
 using ut::MockScript;
@@ -465,8 +465,8 @@ TEST(AcmeClient, ShortReplyClosesTheConnection) {
 }
 ```
 
-The umbrella header `include/updclient/updclient.hpp` lists every public header; adding the new ones is
-optional but keeps `#include <updclient/updclient.hpp>` sufficient for library users.
+The umbrella header `include/updclient.hpp` lists every public header; adding the new ones is
+optional but keeps `#include <updclient.hpp>` sufficient for library users.
 
 ## 3. Add a discovery provider
 
@@ -475,14 +475,14 @@ a constructor argument so tests can inject `ut::FakeDatagrams`. It must return a
 device when `stopAfterFirst` is set, and must report a failure (such as a bind error) as an `Error`, not
 as an empty successful result.
 
-`include/updclient/protocols/acme/discovery.hpp`
+`include/protocols/acme/discovery.hpp`
 
 ```cpp
 #pragma once
 
-#include <updclient/core/export.hpp>
-#include <updclient/discovery/discovery.hpp>
-#include <updclient/net/datagram.hpp>
+#include <core/export.hpp>
+#include <discovery/discovery.hpp>
+#include <net/datagram.hpp>
 
 #include <chrono>
 #include <cstdint>
@@ -518,10 +518,10 @@ UPDCLIENT_API void registerAcmeDiscovery(
 `src/protocols/acme/discovery.cpp`
 
 ```cpp
-#include <updclient/protocols/acme/discovery.hpp>
+#include <protocols/acme/discovery.hpp>
 
-#include <updclient/net/udp_socket.hpp>
-#include <updclient/protocols/acme/client.hpp>
+#include <net/udp_socket.hpp>
+#include <protocols/acme/client.hpp>
 
 #include <algorithm>
 #include <memory>
@@ -620,7 +620,7 @@ and `Context::resolveXbdmEndpoint` run it directly.
 #include "support/fake_datagram_socket.hpp"
 #include "support/test_harness.hpp"
 
-#include <updclient/protocols/acme/discovery.hpp>
+#include <protocols/acme/discovery.hpp>
 
 using namespace updclient;
 using namespace std::chrono_literals;
@@ -659,7 +659,7 @@ declares subcommands and binds callbacks to the shared `Context`.
 #include "cli/args.hpp"
 #include "cli/commands.hpp"
 
-#include <updclient/protocols/acme/client.hpp>
+#include <protocols/acme/client.hpp>
 
 #include <chrono>
 
@@ -791,14 +791,14 @@ No public header changes: `Endpoint` already carries a string host.
 
 ### TLS
 
-- Add `include/updclient/net/tls_transport.hpp` and `src/net/tls_transport.cpp`: an `ITransport` that
+- Add `include/net/tls_transport.hpp` and `src/net/tls_transport.cpp`: an `ITransport` that
   wraps an inner `TransportPtr`, performs the handshake, and implements `readSome`/`writeSome` on the
   TLS session. Its connector, registered for `tls`, opens the inner transport through
   `TransportRegistry::instance().connect(...)` with the scheme rewritten to `tcp`, then handshakes.
   Settings such as certificate verification go in `Endpoint::options`.
 - `CMakeLists.txt`: add the TLS library (a new `FetchContent_Declare` or `find_package`) and link it
   `PRIVATE` to `updclient_lib`. Globbing does not cover dependencies.
-- `src/updclient.cpp` and `include/updclient/updclient.hpp` only if it becomes a built-in.
+- `src/updclient.cpp` and `include/updclient.hpp` only if it becomes a built-in.
 - Add `tests/net/tls_transport_test.cpp`.
 
 `UpdServerClient`, `XellClient` and `http_lite` work over it unchanged. XeLL's HTTPD does not speak TLS, so
@@ -806,7 +806,7 @@ this matters for new devices and protocols.
 
 ### Serial and USB
 
-- Add the files from section 1: `include/updclient/net/serial_transport.hpp`,
+- Add the files from section 1: `include/net/serial_transport.hpp`,
   `src/net/serial_transport.cpp`, `src/net/serial/serial_port.hpp`, and the per-OS implementations.
   No CMake change on POSIX or Windows (termios and the Win32 API come with the platform).
 - `src/cli/app.cpp`: one registration line so `--target serial://...` is accepted.
@@ -821,17 +821,17 @@ this matters for new devices and protocols.
 - `src/protocols/xbdm/client.cpp`: settle each `**[none]**` of `docs/XBDM_PROTOCOL.md` section 6 from the
   reports of `docs/HARDWARE_TEST_PLAN.md`, and adjust `tests/support/xbdm_mock_server.cpp` and its tests
   to the observed answers.
-- Notifications: add a `NotificationChannel` class to `include/updclient/protocols/xbdm/` that opens its
+- Notifications: add a `NotificationChannel` class to `include/protocols/xbdm/` that opens its
   own connection, sends `notify` and parses the event lines of section 3.18; the mock already sends them
   (`XbdmMockServer::notify`).
 - Screenshots: an untiler for format 8888 (spec 3.13) next to `screenshot()`.
 
 ### New console protocols
 
-- Add `include/updclient/protocols/<name>/{protocol,client,discovery}.hpp` and the matching
+- Add `include/protocols/<name>/{protocol,client,discovery}.hpp` and the matching
   `src/protocols/<name>/` sources, as in sections 2 and 3.
 - Add `src/cli/<name>.cpp`, one declaration in `src/cli/commands.hpp` and one call in
   `src/cli/app.cpp`, as in section 4. `src/cli/context.cpp` and `src/cli/session.cpp` need a resolver and
   a `with<Name>` helper if the protocol is used regularly.
 - Add tests under `tests/protocols/<name>/` using `MockScript` and `FakeDatagrams`.
-- Add the headers to `include/updclient/updclient.hpp` (optional).
+- Add the headers to `include/updclient.hpp` (optional).

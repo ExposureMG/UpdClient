@@ -14,10 +14,10 @@ registration line (see [EXTENDING.md](EXTENDING.md)). For how to use the library
 
 ## Layout
 
-Public headers are included as `<updclient/...>`; sources mirror them under `src/`.
+Public headers are included as `<...>`; sources mirror them under `src/`.
 
 ```
-include/updclient/
+include/
   core/        export.hpp expected.hpp error.hpp hex.hpp
   net/         endpoint.hpp transport.hpp transport_registry.hpp datagram.hpp
                tcp_transport.hpp udp_socket.hpp http_lite.hpp
@@ -54,14 +54,14 @@ from `net/` sources.
 
 | Code in | May include | Must not include |
 | --- | --- | --- |
-| `include/updclient/core/` | `core/` and the standard library (and the expected shim's backend) | everything else |
-| `include/updclient/net/` | `core/`, `net/` | `discovery/`, `protocols/`, `src/` headers, any OS socket header, spdlog |
-| `include/updclient/discovery/` | `core/` | `net/`, `protocols/` |
-| `include/updclient/protocols/<p>/` | `core/`, `net/`, `discovery/`, its own protocol directory | another protocol's directory, OS socket headers, spdlog |
+| `include/core/` | `core/` and the standard library (and the expected shim's backend) | everything else |
+| `include/net/` | `core/`, `net/` | `discovery/`, `protocols/`, `src/` headers, any OS socket header, spdlog |
+| `include/discovery/` | `core/` | `net/`, `protocols/` |
+| `include/protocols/<p>/` | `core/`, `net/`, `discovery/`, its own protocol directory | another protocol's directory, OS socket headers, spdlog |
 | `src/net/*.cpp` | public `core/` and `net/`; `net/platform/socket_platform.hpp` (only `tcp_transport.cpp` and `udp_socket.cpp` do) | `protocols/`, `discovery/` |
 | `src/net/platform/` | `core/error.hpp`, OS headers | everything else; it is included by nothing under `include/` |
 | `src/protocols/<p>/*.cpp` | public headers, spdlog | `net/platform/`, another protocol's directory |
-| `src/cli/`, `src/main.cpp` | `<updclient/updclient.hpp>`, CLI11, nlohmann_json, spdlog | `net/platform/` |
+| `src/cli/`, `src/main.cpp` | `<updclient.hpp>`, CLI11, nlohmann_json, spdlog | `net/platform/` |
 | `tests/` | public headers, `tests/support/` | `net/platform/` (the loopback server has its own tiny socket layer) |
 
 These rules hold in the tree today and are checked by `grep -r '#include' include src`:

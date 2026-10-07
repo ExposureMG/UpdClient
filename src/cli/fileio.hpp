@@ -10,7 +10,7 @@
 
 namespace updclient::cli {
 
-// Paths come from UTF-8 command-line text through pathFromUtf8 (updclient/core/path.hpp).
+// Paths come from UTF-8 command-line text through pathFromUtf8 (core/path.hpp).
 
 // Writes to "<path>.part" and renames, so a failed write never leaves a truncated file.
 Outcome<void> writeFile(const std::filesystem::path &path, std::span<const uint8_t> data);

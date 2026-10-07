@@ -1,7 +1,7 @@
 #include "support/fake_datagram_socket.hpp"
 #include "support/test_harness.hpp"
 
-#include <updclient/protocols/updserver/discovery.hpp>
+#include <protocols/updserver/discovery.hpp>
 
 #include <chrono>
 

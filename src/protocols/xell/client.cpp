@@ -1,8 +1,8 @@
-#include <updclient/protocols/xell/client.hpp>
+#include <protocols/xell/client.hpp>
 
-#include <updclient/core/hex.hpp>
-#include <updclient/core/path.hpp>
-#include <updclient/net/transport_registry.hpp>
+#include <core/hex.hpp>
+#include <core/path.hpp>
+#include <net/transport_registry.hpp>
 
 #include <spdlog/spdlog.h>
 
