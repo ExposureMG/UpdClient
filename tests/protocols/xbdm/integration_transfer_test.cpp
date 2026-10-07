@@ -126,7 +126,7 @@ XBDM_LINK_TEST(XbdmTransferIntegration, UploadReplacesAnExistingFileOnlyAfterThe
   const auto lines = rig.mock.commandLines();
   std::vector<std::string> names;
   for (const auto &record : rig.mock.commands()) names.push_back(record.name);
-  CHECK_EQ(names, (std::vector<std::string>{"sendfile", "getfileattributes", "delete", "rename"}));
+  CHECK_EQ(names, (std::vector<std::string>{"getfileattributes", "sendfile", "getfileattributes", "delete", "rename"}));
 
   auto onFolder = client.uploadFromFile(local, "HDD:\\Content");
   CHECK_ERR(onFolder, ErrorCode::InvalidArgument);
@@ -136,6 +136,30 @@ XBDM_LINK_TEST(XbdmTransferIntegration, UploadReplacesAnExistingFileOnlyAfterThe
   CHECK_EQ(consoleStatusCode(client.uploadFromFile(local, "HDD:\\no\\such\\file.bin").error()).value_or(0), 413);
   CHECK_EQ(consoleStatusCode(client.uploadFromFile(local, "FLASH:\\new.bin").error()).value_or(0), 414);
   CHECK_OK(client.debugName());
+}
+
+XBDM_LINK_TEST(XbdmTransferIntegration, AFileAnotherClientCreatesDuringAnUploadSurvives) {
+  Rig rig(link);
+  auto uploader = rig.client();
+  auto other = rig.client();
+  const Bytes data = ut::patternBytes(5000, 31);
+  auto writer = uploader.openWrite("HDD:\\Content\\race.bin", data.size());
+  REQUIRE_OK(writer);
+  const std::string temp = writer->temporaryPath();
+  REQUIRE_OK(writer->write(std::span<const uint8_t>(data).first(2000)));
+  // The second client wins the name while the first is still sending.
+  auto theirs = other.openWrite("HDD:\\Content\\race.bin", 3);
+  REQUIRE_OK(theirs);
+  REQUIRE_OK(theirs->write(ut::bytesOf("own")));
+  REQUIRE_OK(theirs->finish());
+  REQUIRE_OK(writer->write(std::span<const uint8_t>(data).subspan(2000)));
+  auto r = writer->finish();
+  REQUIRE_ERR(r, ErrorCode::InvalidArgument);
+  CHECK_MSG(r.error().message.find("appeared during the upload") != std::string::npos, r.error().message);
+  CHECK_EQ(*rig.mock.fileData("HDD:\\Content\\race.bin"), ut::bytesOf("own"));
+  CHECK(!rig.mock.entry(temp).has_value());
+  CHECK(uploader.pendingCleanup().empty());
+  CHECK_OK(uploader.debugName());
 }
 
 XBDM_LINK_TEST(XbdmTransferIntegration, LargeTransfers) {

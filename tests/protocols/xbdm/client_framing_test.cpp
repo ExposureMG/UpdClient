@@ -195,7 +195,11 @@ TEST(XbdmFraming, ShortStatusLinesHaveASmallLimit) {
   }
   {
     auto console = FakeConsole::create();
-    console->handle([](FakeConsole &c, const std::string &) {
+    console->handle([](FakeConsole &c, const std::string &line) {
+      if (line.rfind("getfileattributes ", 0) == 0) {
+        c.line("402- file not found");
+        return;
+      }
       c.line("204- send binary data");
       c.expectBinary(2, [](FakeConsole &done, const ut::Bytes &) { done.line("200- " + std::string(600, 'k')); });
     });

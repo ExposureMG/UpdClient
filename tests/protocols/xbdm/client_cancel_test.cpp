@@ -69,6 +69,12 @@ public:
     return true;
   }
 
+  // The lookup openWrite() sends before sendfile: nothing of that name.
+  bool answerLookup() {
+    auto line = readLine();
+    return line && line->rfind("getfileattributes ", 0) == 0 && send(std::string_view("402- file not found\r\n"));
+  }
+
   // Blocks until the client closes its end.
   void waitForClose() {
     uint8_t c = 0;
@@ -175,7 +181,7 @@ TEST(XbdmCancel, CancelEndsAnUploadWriteThatIsWaiting) {
   auto pipe = ut::MemoryPipe::create(4096);
   const auto *probe = pipe.client.get();
   PipeConsole console(std::move(pipe.server), [](PipeConsole &c) {
-    if (!c.readLine()) return;
+    if (!c.answerLookup() || !c.readLine()) return;
     c.send(std::string_view("204- send binary data\r\n"));
     while (!c.stop) std::this_thread::sleep_for(1ms);
   });
@@ -204,7 +210,7 @@ TEST(XbdmCancel, CancelEndsAFinishWaitingForTheConsole) {
   auto pipe = ut::MemoryPipe::create();
   const auto *probe = pipe.client.get();
   PipeConsole console(std::move(pipe.server), [](PipeConsole &c) {
-    if (!c.readLine()) return;
+    if (!c.answerLookup() || !c.readLine()) return;
     c.send(std::string_view("204- send binary data\r\n"));
     if (!c.readBytes(5000)) return;
     c.waitForClose();
@@ -320,7 +326,7 @@ TEST(XbdmCancel, DeadlinesBoundATricklingAnswerToBye) {
 TEST(XbdmCancel, DeadlinesBoundATricklingStatusAfterSendfileData) {
   auto pipe = ut::MemoryPipe::create();
   PipeConsole console(std::move(pipe.server), [](PipeConsole &c) {
-    if (!c.readLine()) return;
+    if (!c.answerLookup() || !c.readLine()) return;
     if (!c.send(std::string_view("204- send binary data\r\n")) || !c.readBytes(4)) return;
     if (!c.send(std::string_view("200- "))) return;
     while (!c.stop && c.send(std::string_view("x"))) std::this_thread::sleep_for(5ms);

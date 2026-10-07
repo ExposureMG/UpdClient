@@ -968,6 +968,9 @@ struct FileWriter::State {
   uint64_t written = 0;
   bool open = false;
   bool confirmed = false;
+  // Whether a file of the final name existed when openWrite() ran: only then may
+  // finish() replace one.
+  bool finalExistedAtOpen = false;
 
   std::string context() const { return "sendfile " + path; }
 
@@ -1094,12 +1097,21 @@ Result<void> FileWriter::finish() {
     return unexpected<Error>(std::move(error));
   };
 
+  // A file that was not there at openWrite() is someone else's: left alone.
+  auto appeared = [&]() -> Result<void> {
+    return giveUp(makeError(ErrorCode::InvalidArgument,
+                            s.context() + ": " + s.path + " appeared during the upload and was not replaced; " +
+                                (session.connected() ? "the upload was removed"
+                                                     : "the upload is deleted by the next reconnect()")));
+  };
+
   auto existing = lookUp(session, s.path, false);
   if (!existing) return giveUp(existing.error());
   if (*existing) {
     if ((*existing)->isDirectory) {
       return giveUp(makeError(ErrorCode::InvalidArgument, s.context() + ": a folder of that name exists"));
     }
+    if (!s.finalExistedAtOpen) return appeared();
     auto line = Command("delete").text("name", s.path).finish(session.options.maxCommandBytes);
     if (!line) return giveUp(line.error());
     auto removed = session.request(*line, {status::kOk}, "delete " + s.path);
@@ -1117,7 +1129,15 @@ Result<void> FileWriter::finish() {
   auto line = Command("rename").text("name", s.tempPath).text("newname", s.path).finish(session.options.maxCommandBytes);
   if (!line) return giveUp(line.error());
   auto renamed = session.request(*line, {status::kOk}, "rename " + s.tempPath);
-  if (!renamed) return giveUp(renamed.error());
+  if (!renamed) {
+    // Refused while nothing was deleted: the final name may have appeared since
+    // the lookup. Looked up once more, so other refusals keep their status.
+    if (finalRemoved.empty() && !s.finalExistedAtOpen && isRefusal(renamed.error())) {
+      auto now = lookUp(session, s.path, false);
+      if (now && *now && !(*now)->isDirectory) return appeared();
+    }
+    return giveUp(renamed.error());
+  }
   session.finishCommand();
   return {};
 }
@@ -1750,6 +1770,12 @@ Result<FileWriter> XbdmClient::openWrite(const std::string &path, uint64_t size)
 
   auto line = buildLine(Command("sendfile").text("name", *temp).number("length", size), session);
   if (!line) return unexpected<Error>(line.error());
+  // What is at the final name now decides whether finish() may replace it.
+  auto existing = lookUp(session, *canonical, false);
+  if (!existing) return unexpected<Error>(existing.error());
+  if (*existing && (*existing)->isDirectory) {
+    return fail(ErrorCode::InvalidArgument, context + ": a folder of that name exists");
+  }
   if (auto r = session.checkUsable(context, false); !r) return unexpected<Error>(r.error());
   // Whether a console answers a zero-length sendfile with 204 or 200 is not known.
   auto status = size == 0 ? session.request(*line, {status::kSendBinary, status::kOk}, context)
@@ -1769,6 +1795,7 @@ Result<FileWriter> XbdmClient::openWrite(const std::string &path, uint64_t size)
   state->size = size;
   state->open = true;
   state->confirmed = status->code == status::kOk;
+  state->finalExistedAtOpen = existing->has_value();
   session.transferActive = true;
   return FileWriter(std::move(state));
 }

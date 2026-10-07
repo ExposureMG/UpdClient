@@ -268,11 +268,16 @@ private:
   std::unique_ptr<State> state_;
 };
 
-// A sendfile in progress, to a temporary name in the target folder. write() sends
-// the bytes; finish() wants exactly size() of them, waits for the console's answer
-// and only then renames the temporary file to the final name (deleting a file of
-// that name first). A refusal after the data, or a failed rename while no file of
-// the final name was deleted, deletes the temporary file on the same connection.
+// A sendfile in progress, to a temporary name in the target folder. openWrite()
+// looks the final name up first (a folder there fails at once). write() sends the
+// bytes; finish() wants exactly size() of them, waits for the console's answer and
+// only then renames the temporary file to the final name, replacing a file of that
+// name only if one existed when openWrite() ran. A file that appeared meanwhile
+// fails finish() with InvalidArgument and is left alone; one that appears between
+// finish()'s own lookup and the rename cannot be told apart on a console whose
+// rename replaces (section 3.10). A refusal after the data, or a failed rename
+// while no file of the final name was deleted, deletes the temporary file on the
+// same connection.
 // Once the old file was deleted, or its delete got no answer, the temporary file
 // may be the only copy of either version: a failed rename then keeps it, names it
 // in the error ("the upload is kept as ...") and never queues it for deletion.

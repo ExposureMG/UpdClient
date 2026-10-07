@@ -333,6 +333,7 @@ TEST(XbdmTransfer, UploadGoesToATemporaryNameAndIsRenamedAfterTheConsoleConfirme
   CHECK_EQ(fs.names(), std::vector<std::string>{"HDD:\\Games\\a rather long file name for FATX.bin"});
   CHECK_EQ(fs.files.begin()->second, data);
   const std::vector<std::string> expected = {
+      "getfileattributes name=\"HDD:\\Games\\a rather long file name for FATX.bin\"",
       "sendfile name=\"" + temp + "\" length=0x249f0",
       "getfileattributes name=\"HDD:\\Games\\a rather long file name for FATX.bin\"",
       "rename name=\"" + temp + "\" newname=\"HDD:\\Games\\a rather long file name for FATX.bin\"",
@@ -355,8 +356,8 @@ TEST(XbdmTransfer, UploadReplacesAnExistingFile) {
   REQUIRE_OK(writer->finish());
   CHECK_EQ(fs.names(), std::vector<std::string>{"HDD:\\x.txt"});
   CHECK_EQ(fs.files["HDD:\\x.txt"], ut::bytesOf("new"));
-  REQUIRE_EQ(console->commands().size(), size_t{4});
-  CHECK_EQ(console->commands()[2], std::string("delete name=\"HDD:\\x.txt\""));
+  REQUIRE_EQ(console->commands().size(), size_t{5});
+  CHECK_EQ(console->commands()[3], std::string("delete name=\"HDD:\\x.txt\""));
   CHECK_EQ(console->problems(), std::string());
 }
 
@@ -439,10 +440,12 @@ TEST(XbdmTransfer, ADeleteThatWasNeverSentDoesNotKeepTheUpload) {
   Files fs;
   fs.files["HDD:\\x.txt"] = ut::bytesOf("old");
   auto console = FakeConsole::create();
-  console->handle([&fs](FakeConsole &c, const std::string &line) {
+  int lookups = 0;
+  console->handle([&fs, &lookups](FakeConsole &c, const std::string &line) {
     fs.serve(c, line);
-    // The connection drops before a byte of the next line, the delete, goes out.
-    if (line.rfind("getfileattributes ", 0) == 0) c.dropAfterWritten(c.written());
+    // After finish()'s lookup the connection drops before a byte of the next line,
+    // the delete, goes out.
+    if (line.rfind("getfileattributes ", 0) == 0 && ++lookups == 2) c.dropAfterWritten(c.written());
   });
   auto client = connected(console);
   auto writer = client.openWrite("HDD:\\x.txt", 3);
@@ -480,24 +483,110 @@ TEST(XbdmTransfer, UploadFindsTheFileToReplaceInTheListingWithoutGetfileattribut
   REQUIRE_OK(writer->finish());
   CHECK_EQ(fs.names(), std::vector<std::string>{"HDD:\\d\\x.txt"});
   CHECK_EQ(fs.files["HDD:\\d\\x.txt"], ut::bytesOf("new"));
-  REQUIRE_EQ(console->commands().size(), size_t{5});
-  CHECK_EQ(console->commands()[3], std::string("delete name=\"HDD:\\d\\x.txt\""));
+  // The listing is read in openWrite() and again in finish().
+  REQUIRE_EQ(console->commands().size(), size_t{7});
+  CHECK_EQ(console->commands()[1], std::string("dirlist name=\"HDD:\\d\\\""));
+  CHECK_EQ(console->commands()[5], std::string("delete name=\"HDD:\\d\\x.txt\""));
 }
 
-TEST(XbdmTransfer, UploadOntoAFolderFailsAndRemovesTheTemporaryFile) {
+TEST(XbdmTransfer, UploadOntoAFolderFailsBeforeTheData) {
   Files fs;
   fs.folders.push_back("HDD:\\dir");
   auto console = FakeConsole::create();
   fs.install(*console);
   auto client = connected(console);
+  CHECK_ERR(client.openWrite("HDD:\\dir", 2), ErrorCode::InvalidArgument);
+  CHECK_EQ(console->commands(), std::vector<std::string>{"getfileattributes name=\"HDD:\\dir\""});
+  CHECK(fs.files.empty());
+  CHECK(client.isConnected());
+  CHECK(!client.transferActive());
+  CHECK(client.pendingCleanup().empty());
+}
+
+TEST(XbdmTransfer, AFolderThatAppearsDuringTheUploadFailsAndRemovesTheTemporaryFile) {
+  Files fs;
+  auto console = FakeConsole::create();
+  fs.install(*console);
+  auto client = connected(console);
   auto writer = client.openWrite("HDD:\\dir", 2);
   REQUIRE_OK(writer);
+  fs.folders.push_back("HDD:\\dir");
   REQUIRE_OK(writer->write(ut::Bytes{1, 2}));
   CHECK_ERR(writer->finish(), ErrorCode::InvalidArgument);
   CHECK(fs.files.empty());
   CHECK_EQ(console->lastCommand(), "delete name=\"" + writer->temporaryPath() + "\"");
   CHECK(client.isConnected());
   CHECK(client.pendingCleanup().empty());
+}
+
+TEST(XbdmTransfer, AFileThatAppearsDuringTheUploadIsNotReplaced) {
+  Files fs;
+  auto console = FakeConsole::create();
+  console->handle([&fs](FakeConsole &c, const std::string &line) {
+    fs.serve(c, line);
+    // Another client creates the final name while the data is on its way.
+    if (line.rfind("sendfile ", 0) == 0) fs.files["HDD:\\x.txt"] = ut::bytesOf("theirs");
+  });
+  auto client = connected(console);
+  auto writer = client.openWrite("HDD:\\x.txt", 3);
+  REQUIRE_OK(writer);
+  const std::string temp = writer->temporaryPath();
+  REQUIRE_OK(writer->write(ut::bytesOf("new")));
+  auto r = writer->finish();
+  REQUIRE_ERR(r, ErrorCode::InvalidArgument);
+  CHECK_MSG(r.error().message.find("HDD:\\x.txt appeared during the upload and was not replaced; the upload was removed") !=
+                std::string::npos,
+            r.error().message);
+  CHECK_EQ(fs.names(), std::vector<std::string>{"HDD:\\x.txt"});
+  CHECK_EQ(fs.files["HDD:\\x.txt"], ut::bytesOf("theirs"));
+  CHECK_EQ(console->lastCommand(), "delete name=\"" + temp + "\"");
+  for (const auto &command : console->commands()) CHECK(command != "delete name=\"HDD:\\x.txt\"");
+  CHECK(client.isConnected());
+  CHECK(client.pendingCleanup().empty());
+  CHECK_OK(client.attributes("HDD:\\x.txt"));
+}
+
+TEST(XbdmTransfer, AFileThatAppearsBeforeTheRenameIsNotReplaced) {
+  Files fs;
+  auto console = FakeConsole::create();
+  console->handle([&fs](FakeConsole &c, const std::string &line) {
+    if (line.rfind("rename ", 0) == 0) {
+      // The final name appears between finish()'s lookup and the rename.
+      fs.files["HDD:\\x.txt"] = ut::bytesOf("theirs");
+      c.line("410- already exists");
+      return;
+    }
+    fs.serve(c, line);
+  });
+  auto client = connected(console);
+  auto writer = client.openWrite("HDD:\\x.txt", 3);
+  REQUIRE_OK(writer);
+  const std::string temp = writer->temporaryPath();
+  REQUIRE_OK(writer->write(ut::bytesOf("new")));
+  auto r = writer->finish();
+  REQUIRE_ERR(r, ErrorCode::InvalidArgument);
+  CHECK_MSG(r.error().message.find("appeared during the upload") != std::string::npos, r.error().message);
+  CHECK_EQ(fs.files["HDD:\\x.txt"], ut::bytesOf("theirs"));
+  CHECK_EQ(fs.files.count(temp), size_t{0});
+  CHECK_EQ(console->lastCommand(), "delete name=\"" + temp + "\"");
+  CHECK(client.pendingCleanup().empty());
+}
+
+TEST(XbdmTransfer, AFileReplacedDuringTheUploadIsStillReplaced) {
+  Files fs;
+  fs.files["HDD:\\x.txt"] = ut::bytesOf("old");
+  auto console = FakeConsole::create();
+  console->handle([&fs](FakeConsole &c, const std::string &line) {
+    fs.serve(c, line);
+    if (line.rfind("sendfile ", 0) == 0) fs.files["HDD:\\x.txt"] = ut::bytesOf("other");
+  });
+  auto client = connected(console);
+  auto writer = client.openWrite("HDD:\\x.txt", 3);
+  REQUIRE_OK(writer);
+  REQUIRE_OK(writer->write(ut::bytesOf("new")));
+  REQUIRE_OK(writer->finish());
+  CHECK_EQ(fs.names(), std::vector<std::string>{"HDD:\\x.txt"});
+  CHECK_EQ(fs.files["HDD:\\x.txt"], ut::bytesOf("new"));
 }
 
 TEST(XbdmTransfer, RefusalsBeforeAndAfterTheData) {
@@ -528,7 +617,10 @@ TEST(XbdmTransfer, RefusalsBeforeAndAfterTheData) {
     CHECK_EQ(console->lastCommand(), "delete name=\"" + writer->temporaryPath() + "\"");
     CHECK(client.isConnected());
     CHECK(fs.files.empty());
-    for (const auto &command : console->commands()) CHECK(command.find("HDD:\\full.bin\"") == std::string::npos);
+    // Only looked up, never changed.
+    for (const auto &command : console->commands()) {
+      if (command.rfind("getfileattributes ", 0) != 0) CHECK(command.find("HDD:\\full.bin\"") == std::string::npos);
+    }
   }
   {
     Files fs;
@@ -575,7 +667,9 @@ TEST(XbdmTransfer, DropMidUploadLeavesNothingUnderTheFinalNameAndReconnectCleans
   CHECK(!client.transferActive());
   CHECK_EQ(client.pendingCleanup(), std::vector<std::string>{temp});
   CHECK(fs.files.empty());
-  for (const auto &command : first->commands()) CHECK(command.find("keep.bin\"") == std::string::npos);
+  for (const auto &command : first->commands()) {
+    if (command.rfind("getfileattributes ", 0) != 0) CHECK(command.find("keep.bin\"") == std::string::npos);
+  }
   CHECK_ERR(writer->finish(), ErrorCode::NotConnected);
 
   REQUIRE_OK(client.reconnect());
@@ -586,7 +680,11 @@ TEST(XbdmTransfer, DropMidUploadLeavesNothingUnderTheFinalNameAndReconnectCleans
 
 TEST(XbdmTransfer, ALostSendfileAnswerQueuesTheTemporaryName) {
   auto first = FakeConsole::create();
-  first->handle([](FakeConsole &c, const std::string &) {
+  first->handle([](FakeConsole &c, const std::string &line) {
+    if (line.rfind("getfileattributes ", 0) == 0) {
+      c.line("402- file not found");
+      return;
+    }
     c.send(std::string_view("204- send bin"));
     c.hangUp();
   });
@@ -602,8 +700,8 @@ TEST(XbdmTransfer, ALostSendfileAnswerQueuesTheTemporaryName) {
   REQUIRE_EQ(client.pendingCleanup().size(), size_t{1});
   const std::string temp = client.pendingCleanup().front();
   CHECK(isTemporaryFor(temp, "HDD:", "up.bin"));
-  REQUIRE_EQ(first->commands().size(), size_t{1});
-  CHECK_EQ(first->commands()[0].find("sendfile name=\"" + temp + "\""), size_t{0});
+  REQUIRE_EQ(first->commands().size(), size_t{2});
+  CHECK_EQ(first->commands()[1].find("sendfile name=\"" + temp + "\""), size_t{0});
   REQUIRE_OK(client.reconnect());
   CHECK_EQ(deleted, std::vector<std::string>{"delete name=\"" + temp + "\""});
   CHECK(client.pendingCleanup().empty());
@@ -685,7 +783,7 @@ TEST(XbdmTransfer, ZeroLengthUploads) {
   auto confirmed = other.openWrite("HDD:\\zero", 0);
   REQUIRE_OK(confirmed);
   REQUIRE_OK(confirmed->finish());
-  CHECK_EQ(direct->commands().size(), size_t{3});
+  CHECK_EQ(direct->commands().size(), size_t{4});
 
   auto strict = FakeConsole::create();
   strict->handle([](FakeConsole &c, const std::string &) { c.line("200- OK"); });
