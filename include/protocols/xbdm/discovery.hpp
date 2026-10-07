@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <functional>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -49,7 +50,8 @@ struct DiscoveryOptions {
 // Finds consoles with the XBDM name protocol on UDP port 730 (section 2): a
 // type-3 wildcard broadcast that every console answers with its name. Devices are
 // reported with protocol "xbdm", the reply's source address, and info "name",
-// "udpName" (the name in the reply) and "port". Replies are de-duplicated by
+// "udpName" (the name in the reply) and "port" (DiscoveryOptions::port, which is
+// also the TCP port the dbgname query uses). Replies are de-duplicated by
 // address. Whether every console answers UDP is not known, and networks often
 // block broadcasts: identify() is the way in by address alone.
 //
@@ -76,6 +78,20 @@ public:
   Result<std::optional<discovery::DiscoveredDevice>> probeAddress(std::string_view address,
                                                                   std::chrono::milliseconds timeout);
 
+  // As above; a stop request ends the search, within one receive slice (200 ms)
+  // while waiting for replies and at once during a dbgname query. A stopped search
+  // succeeds with what it found so far: no name queries follow a stop in the UDP
+  // phase, and consoles not asked keep their UDP names. With an injected connector
+  // its TCP connect runs to its own end. The token is used only during the call.
+  Result<std::vector<discovery::DiscoveredDevice>> discover(std::chrono::milliseconds timeout, bool stopAfterFirst,
+                                                            std::stop_token stop);
+  Result<std::optional<discovery::DiscoveredDevice>> findByName(std::string_view consoleName,
+                                                                std::chrono::milliseconds timeout,
+                                                                std::stop_token stop);
+  Result<std::optional<discovery::DiscoveredDevice>> probeAddress(std::string_view address,
+                                                                  std::chrono::milliseconds timeout,
+                                                                  std::stop_token stop);
+
 private:
   struct Search;
   Result<std::vector<discovery::DiscoveredDevice>> run(const Search &search, std::chrono::milliseconds timeout);
@@ -90,6 +106,10 @@ private:
 // not answer it: connects, reads the greeting and asks dbgname. The device has
 // the endpoint's host as address and info "name" and "port".
 UPDCLIENT_API Result<discovery::DiscoveredDevice> identify(const net::Endpoint &endpoint, ClientOptions options = {});
+// As above; a stop request ends the connect, the greeting or the dbgname query at
+// once with Cancelled.
+UPDCLIENT_API Result<discovery::DiscoveredDevice> identify(const net::Endpoint &endpoint, ClientOptions options,
+                                                           std::stop_token stop);
 
 // Adds an XbdmDiscovery provider. Not part of registerBuiltins().
 UPDCLIENT_API void registerXbdmDiscovery(

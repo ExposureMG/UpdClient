@@ -10,6 +10,7 @@
 #include <cctype>
 #include <memory>
 #include <set>
+#include <stop_token>
 #include <utility>
 
 namespace updclient::xbdm {
@@ -37,6 +38,65 @@ discovery::DiscoveredDevice deviceFor(const std::string &address, const std::str
   return device;
 }
 
+// Asks every console for its dbgname, within the budget, until a stop request.
+// A stop during a query cancels it; consoles not asked keep their UDP names.
+void resolveNamesWith(const DiscoveryOptions &discoveryOptions, const XbdmDiscovery::Connector &connector,
+                      std::vector<discovery::DiscoveredDevice> &devices, std::stop_token stop) {
+  if (!discoveryOptions.queryNames) return;
+  const bool budgeted = discoveryOptions.nameQueryBudget.count() > 0;
+  const auto budgetEnd = net::deadlineAfter(discoveryOptions.nameQueryBudget);
+  size_t asked = 0;
+  for (auto &device : devices) {
+    if (stop.stop_requested()) {
+      spdlog::debug("XBDM discovery: stopped before asking {} of {} consoles for their names", devices.size() - asked,
+                    devices.size());
+      break;
+    }
+    ClientOptions options = discoveryOptions.nameQuery;
+    if (budgeted) {
+      const auto remaining = std::chrono::floor<milliseconds>(budgetEnd - std::chrono::steady_clock::now());
+      if (remaining <= milliseconds(0)) {
+        spdlog::debug("XBDM discovery: no time left to ask {} of {} consoles for their names",
+                      devices.size() - asked, devices.size());
+        break;
+      }
+      // Every wait of the query fits in what is left of the budget.
+      auto cap = [&](milliseconds &timeout) {
+        if (timeout.count() == 0 || timeout > remaining) timeout = remaining;
+      };
+      cap(options.greetingTimeout);
+      cap(options.idleTimeout);
+      cap(options.commandTimeout);
+      cap(options.byeTimeout);
+    }
+    ++asked;
+
+    net::Endpoint endpoint;
+    endpoint.scheme = "xbdm";
+    endpoint.host = device.address;
+    endpoint.port = discoveryOptions.port;
+    endpoint.timeout = options.greetingTimeout;
+
+    // An injected connector runs to its own end; the greeting is still cancelled.
+    Result<XbdmClient> client =
+        connector ? XbdmClient::open([connector, endpoint] { return connector(endpoint); }, options, stop)
+                  : XbdmClient::connect(endpoint, options, stop);
+    if (!client) {
+      spdlog::debug("XBDM discovery: {} did not answer over TCP: {}", device.address, formatError(client.error()));
+      continue;
+    }
+    Result<std::string> name = [&] {
+      std::stop_callback onStop(stop, [&client] { client->cancel(); });
+      return client->debugName();
+    }();
+    if (name && !name->empty()) {
+      device.info["name"] = *name;
+    } else if (!name) {
+      spdlog::debug("XBDM discovery: dbgname on {} failed: {}", device.address, formatError(name.error()));
+    }
+  }
+}
+
 } // namespace
 
 struct XbdmDiscovery::Search {
@@ -47,6 +107,9 @@ struct XbdmDiscovery::Search {
   // Empty accepts every sender.
   std::string wantedSender;
   bool stopAfterFirst = false;
+  std::stop_token stop;
+  // Set by run() when the stop request ended the search.
+  mutable bool stopped = false;
 };
 
 XbdmDiscovery::XbdmDiscovery(net::DatagramSocketFactory socketFactory, DiscoveryOptions options, Connector connector)
@@ -79,6 +142,11 @@ Result<std::vector<discovery::DiscoveredDevice>> XbdmDiscovery::run(const Search
   std::vector<discovery::DiscoveredDevice> devices;
   std::set<std::string> seen;
   for (bool first = true;; first = false) {
+    if (search.stop.stop_requested()) {
+      search.stopped = true;
+      spdlog::debug("XBDM discovery stopped after {} replies", devices.size());
+      break;
+    }
     auto now = std::chrono::steady_clock::now();
     if (sent < sends && now >= nextSend) {
       auto r = socket->sendTo(search.packet, search.destination, options_.port);
@@ -126,7 +194,7 @@ Result<std::vector<discovery::DiscoveredDevice>> XbdmDiscovery::run(const Search
     }
     seen.insert(datagram.senderAddress);
 
-    devices.push_back(deviceFor(datagram.senderAddress, *replyName, kXbdmPort));
+    devices.push_back(deviceFor(datagram.senderAddress, *replyName, options_.port));
     spdlog::debug("XBDM console '{}' at {}", *replyName, datagram.senderAddress);
     if (search.stopAfterFirst) break;
   }
@@ -135,69 +203,34 @@ Result<std::vector<discovery::DiscoveredDevice>> XbdmDiscovery::run(const Search
 }
 
 void XbdmDiscovery::resolveNames(std::vector<discovery::DiscoveredDevice> &devices) {
-  if (!options_.queryNames) return;
-  const bool budgeted = options_.nameQueryBudget.count() > 0;
-  const auto budgetEnd = net::deadlineAfter(options_.nameQueryBudget);
-  size_t asked = 0;
-  for (auto &device : devices) {
-    ClientOptions options = options_.nameQuery;
-    if (budgeted) {
-      const auto remaining = std::chrono::floor<milliseconds>(budgetEnd - std::chrono::steady_clock::now());
-      if (remaining <= milliseconds(0)) {
-        spdlog::debug("XBDM discovery: no time left to ask {} of {} consoles for their names",
-                      devices.size() - asked, devices.size());
-        break;
-      }
-      // Every wait of the query fits in what is left of the budget.
-      auto cap = [&](milliseconds &timeout) {
-        if (timeout.count() == 0 || timeout > remaining) timeout = remaining;
-      };
-      cap(options.greetingTimeout);
-      cap(options.idleTimeout);
-      cap(options.commandTimeout);
-      cap(options.byeTimeout);
-    }
-    ++asked;
-
-    net::Endpoint endpoint;
-    endpoint.scheme = "xbdm";
-    endpoint.host = device.address;
-    endpoint.port = kXbdmPort;
-    endpoint.timeout = options.greetingTimeout;
-
-    Result<XbdmClient> client = connector_
-                                    ? [&]() -> Result<XbdmClient> {
-                                        auto transport = connector_(endpoint);
-                                        if (!transport) return unexpected<Error>(transport.error());
-                                        return XbdmClient::attach(std::move(*transport), options);
-                                      }()
-                                    : XbdmClient::connect(endpoint, options);
-    if (!client) {
-      spdlog::debug("XBDM discovery: {} did not answer over TCP: {}", device.address, formatError(client.error()));
-      continue;
-    }
-    auto name = client->debugName();
-    if (name && !name->empty()) {
-      device.info["name"] = *name;
-    } else if (!name) {
-      spdlog::debug("XBDM discovery: dbgname on {} failed: {}", device.address, formatError(name.error()));
-    }
-  }
+  resolveNamesWith(options_, connector_, devices, std::stop_token());
 }
 
 Result<std::vector<discovery::DiscoveredDevice>> XbdmDiscovery::discover(milliseconds timeout, bool stopAfterFirst) {
+  return discover(timeout, stopAfterFirst, std::stop_token());
+}
+
+Result<std::vector<discovery::DiscoveredDevice>> XbdmDiscovery::discover(milliseconds timeout, bool stopAfterFirst,
+                                                                         std::stop_token stop) {
   Search search;
   search.packet = makeWildcardQuery();
   search.destination = options_.broadcastAddress;
   search.stopAfterFirst = stopAfterFirst;
+  search.stop = stop;
   auto devices = run(search, timeout);
   if (!devices) return devices;
-  resolveNames(*devices);
+  if (!search.stopped) resolveNamesWith(options_, connector_, *devices, stop);
   return devices;
 }
 
 Result<std::optional<discovery::DiscoveredDevice>> XbdmDiscovery::findByName(std::string_view consoleName,
                                                                              milliseconds timeout) {
+  return findByName(consoleName, timeout, std::stop_token());
+}
+
+Result<std::optional<discovery::DiscoveredDevice>> XbdmDiscovery::findByName(std::string_view consoleName,
+                                                                             milliseconds timeout,
+                                                                             std::stop_token stop) {
   auto packet = makeNameLookup(consoleName);
   if (!packet) return unexpected<Error>(packet.error());
   Search search;
@@ -205,32 +238,48 @@ Result<std::optional<discovery::DiscoveredDevice>> XbdmDiscovery::findByName(std
   search.destination = options_.broadcastAddress;
   search.wantedName = std::string(consoleName);
   search.stopAfterFirst = true;
+  search.stop = stop;
   auto devices = run(search, timeout);
   if (!devices) return unexpected<Error>(devices.error());
   if (devices->empty()) return std::optional<discovery::DiscoveredDevice>{};
-  resolveNames(*devices);
+  if (!search.stopped) resolveNamesWith(options_, connector_, *devices, stop);
   return std::optional<discovery::DiscoveredDevice>(std::move(devices->front()));
 }
 
 Result<std::optional<discovery::DiscoveredDevice>> XbdmDiscovery::probeAddress(std::string_view address,
                                                                                milliseconds timeout) {
+  return probeAddress(address, timeout, std::stop_token());
+}
+
+Result<std::optional<discovery::DiscoveredDevice>> XbdmDiscovery::probeAddress(std::string_view address,
+                                                                               milliseconds timeout,
+                                                                               std::stop_token stop) {
   if (address.empty()) return fail(ErrorCode::InvalidArgument, "no address to probe");
   Search search;
   search.packet = makeWildcardQuery();
   search.destination = std::string(address);
   search.wantedSender = std::string(address);
   search.stopAfterFirst = true;
+  search.stop = stop;
   auto devices = run(search, timeout);
   if (!devices) return unexpected<Error>(devices.error());
   if (devices->empty()) return std::optional<discovery::DiscoveredDevice>{};
-  resolveNames(*devices);
+  if (!search.stopped) resolveNamesWith(options_, connector_, *devices, stop);
   return std::optional<discovery::DiscoveredDevice>(std::move(devices->front()));
 }
 
 Result<discovery::DiscoveredDevice> identify(const net::Endpoint &endpoint, ClientOptions options) {
-  auto client = XbdmClient::connect(endpoint, std::move(options));
+  return identify(endpoint, std::move(options), std::stop_token());
+}
+
+Result<discovery::DiscoveredDevice> identify(const net::Endpoint &endpoint, ClientOptions options,
+                                             std::stop_token stop) {
+  auto client = XbdmClient::connect(endpoint, std::move(options), stop);
   if (!client) return unexpected<Error>(client.error());
-  auto name = client->debugName();
+  Result<std::string> name = [&] {
+    std::stop_callback onStop(stop, [&client] { client->cancel(); });
+    return client->debugName();
+  }();
   if (!name) return unexpected<Error>(name.error());
   discovery::DiscoveredDevice device;
   device.protocol = "xbdm";

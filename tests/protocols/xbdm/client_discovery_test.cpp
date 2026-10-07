@@ -10,6 +10,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <thread>
 #include <vector>
@@ -263,6 +264,115 @@ TEST(XbdmDiscovery, DbgnameOverTcpReplacesTheUdpName) {
   CHECK_EQ((*found)[0].info.at("udpName"), std::string("udp-a"));
   CHECK_EQ((*found)[1].info.at("name"), std::string("udp-b"));
   CHECK_EQ(asked, (std::vector<std::string>{"10.0.0.1:730", "10.0.0.2:730"}));
+}
+
+TEST(XbdmDiscovery, ReportsAndQueriesTheConfiguredPort) {
+  auto network = FakeNetwork::create();
+  network->replyToSend(0, reply("udp"), "10.0.0.1");
+  std::vector<uint16_t> ports;
+  auto connector = [&](const net::Endpoint &endpoint) -> Result<net::TransportPtr> {
+    ports.push_back(endpoint.port);
+    auto console = xt::FakeConsole::create();
+    console->on("dbgname", "200- Tcp\r\n");
+    return console->transport();
+  };
+  DiscoveryOptions options;
+  options.port = 7300;
+  XbdmDiscovery discovery(network->factory(), options, connector);
+  auto found = discovery.discover(30ms, true);
+  REQUIRE_OK(found);
+  REQUIRE_EQ(found->size(), size_t{1});
+  CHECK_EQ((*found)[0].info.at("port"), std::string("7300"));
+  CHECK_EQ((*found)[0].info.at("name"), std::string("Tcp"));
+  CHECK_EQ(ports, std::vector<uint16_t>{7300});
+  CHECK_EQ(network->sent()[0].port, 7300);
+}
+
+TEST(XbdmDiscovery, AStopDuringTheUdpPhaseReturnsWhatWasFound) {
+  auto network = FakeNetwork::create();
+  network->replyToSend(0, reply("Early"), "10.0.0.1");
+  int connects = 0;
+  auto connector = [&](const net::Endpoint &) -> Result<net::TransportPtr> {
+    ++connects;
+    return fail(ErrorCode::ConnectFailed, "not expected");
+  };
+  XbdmDiscovery discovery(network->factory(), DiscoveryOptions{}, connector);
+  std::stop_source source;
+  std::chrono::steady_clock::time_point stoppedAt;
+  std::thread stopper([&] {
+    std::this_thread::sleep_for(100ms);
+    stoppedAt = std::chrono::steady_clock::now();
+    source.request_stop();
+  });
+  auto found = discovery.discover(5s, false, source.get_token());
+  const auto end = std::chrono::steady_clock::now();
+  stopper.join();
+  REQUIRE_OK(found);
+  REQUIRE_EQ(found->size(), size_t{1});
+  CHECK_EQ((*found)[0].info.at("name"), std::string("Early"));
+  CHECK_EQ(connects, 0);
+  CHECK(end - stoppedAt < 300ms);
+}
+
+TEST(XbdmDiscovery, AStopDuringNameQueriesKeepsUdpNames) {
+  auto network = FakeNetwork::create();
+  network->replyToSend(0, reply("udp-a"), "10.0.0.1")
+      .replyToSend(0, reply("udp-b"), "10.0.0.2")
+      .replyToSend(0, reply("udp-c"), "10.0.0.3");
+  std::stop_source source;
+  int connects = 0;
+  auto connector = [&](const net::Endpoint &) -> Result<net::TransportPtr> {
+    ++connects;
+    source.request_stop();
+    auto console = xt::FakeConsole::create();
+    console->on("dbgname", "200- Tcp\r\n");
+    return console->transport();
+  };
+  XbdmDiscovery discovery(network->factory(), DiscoveryOptions{}, connector);
+  auto found = discovery.discover(30ms, false, source.get_token());
+  REQUIRE_OK(found);
+  REQUIRE_EQ(found->size(), size_t{3});
+  CHECK_EQ(connects, 1);
+  CHECK_EQ((*found)[0].info.at("name"), std::string("udp-a"));
+  CHECK_EQ((*found)[1].info.at("name"), std::string("udp-b"));
+  CHECK_EQ((*found)[2].info.at("name"), std::string("udp-c"));
+}
+
+TEST(XbdmDiscovery, AStopBeforeTheSearchIsAnEmptyResult) {
+  auto network = FakeNetwork::create();
+  network->replyToSend(0, reply("Kit"), "10.0.0.1");
+  XbdmDiscovery discovery(network->factory(), udpOnly());
+  std::stop_source source;
+  source.request_stop();
+  auto found = discovery.discover(5s, false, source.get_token());
+  REQUIRE_OK(found);
+  CHECK(found->empty());
+  CHECK(network->sent().empty());
+  auto byName = discovery.findByName("Kit", 5s, source.get_token());
+  REQUIRE_OK(byName);
+  CHECK(!byName->has_value());
+  auto probed = discovery.probeAddress("10.0.0.1", 5s, source.get_token());
+  REQUIRE_OK(probed);
+  CHECK(!probed->has_value());
+}
+
+TEST(XbdmDiscovery, IdentifyStoppedIsCancelled) {
+  auto &registry = net::TransportRegistry::instance();
+  int connects = 0;
+  registry.registerScheme("xbdmtestfake", [&](const net::Endpoint &) -> Result<net::TransportPtr> {
+    ++connects;
+    auto console = xt::FakeConsole::create();
+    console->on("dbgname", "200- Typed In\r\n");
+    return console->transport();
+  }, net::SchemeTraits{0, true});
+  auto endpoint = net::Endpoint::parse("xbdmtestfake://10.1.2.3");
+  std::stop_source source;
+  source.request_stop();
+  auto device = endpoint ? identify(*endpoint, xt::quickOptions(), source.get_token())
+                         : Result<discovery::DiscoveredDevice>(unexpected<Error>(endpoint.error()));
+  registry.unregisterScheme("xbdmtestfake");
+  CHECK_ERR(device, ErrorCode::Cancelled);
+  CHECK_EQ(connects, 0);
 }
 
 TEST(XbdmDiscovery, RepliesFromTooManyAddressesAreIgnored) {

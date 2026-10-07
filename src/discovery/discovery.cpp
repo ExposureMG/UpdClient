@@ -1,5 +1,7 @@
 #include <discovery/discovery.hpp>
 
+#include <protocols/xbdm/discovery.hpp>
+
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
@@ -37,12 +39,24 @@ std::vector<std::shared_ptr<IDiscoveryProvider>> DiscoveryRegistry::providers() 
 
 Result<std::vector<DiscoveredDevice>>
 DiscoveryRegistry::discoverAll(std::chrono::milliseconds timeout, bool stopAfterFirst) const {
+  return discoverAll(timeout, stopAfterFirst, std::stop_token());
+}
+
+Result<std::vector<DiscoveredDevice>>
+DiscoveryRegistry::discoverAll(std::chrono::milliseconds timeout, bool stopAfterFirst, std::stop_token stop) const {
   std::vector<DiscoveredDevice> devices;
   std::optional<Error> firstError;
   bool anySucceeded = false;
 
   for (const auto &provider : providers()) {
-    auto found = provider->discover(timeout, stopAfterFirst);
+    if (stop.stop_requested()) {
+      spdlog::debug("discovery stopped before provider '{}'", provider->name());
+      break;
+    }
+    // IDiscoveryProvider has no virtual that takes a token; the built-in XBDM
+    // provider is reached directly.
+    auto *xbdm = dynamic_cast<xbdm::XbdmDiscovery *>(provider.get());
+    auto found = xbdm ? xbdm->discover(timeout, stopAfterFirst, stop) : provider->discover(timeout, stopAfterFirst);
     if (!found) {
       spdlog::debug("discovery provider '{}' failed: {}", provider->name(), formatError(found.error()));
       if (!firstError) firstError = found.error();

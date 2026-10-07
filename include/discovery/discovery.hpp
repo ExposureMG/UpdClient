@@ -7,6 +7,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <stop_token>
 #include <string>
 #include <vector>
 
@@ -51,6 +52,11 @@ public:
   // With stopAfterFirst, stops at the first provider that finds a device.
   Result<std::vector<DiscoveredDevice>> discoverAll(std::chrono::milliseconds timeout,
                                                     bool stopAfterFirst = false) const;
+  // As above; a stop request skips the providers not run yet and returns what was
+  // found. The token reaches XbdmDiscovery providers, which stop early too; other
+  // providers run to their timeout.
+  Result<std::vector<DiscoveredDevice>> discoverAll(std::chrono::milliseconds timeout, bool stopAfterFirst,
+                                                    std::stop_token stop) const;
 
 private:
   mutable std::mutex mutex_;

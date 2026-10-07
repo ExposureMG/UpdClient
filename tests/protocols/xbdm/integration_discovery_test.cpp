@@ -5,6 +5,9 @@
 #include <net/transport_registry.hpp>
 #include <protocols/xbdm/discovery.hpp>
 
+#include <stop_token>
+#include <thread>
+
 // XbdmDiscovery against the mock's name responder (section 2): in memory through
 // the mock's datagram sockets, and over real UDP on loopback.
 
@@ -137,6 +140,30 @@ TEST(XbdmDiscoveryIntegration, OverRealUdpOnLoopback) {
   REQUIRE_OK(byName);
   CHECK(byName->has_value());
   CHECK(mock.nameRequestsSeen() >= 2);
+}
+
+TEST(XbdmDiscoveryIntegration, AStopEndsARealLoopbackSearch) {
+  XbdmMockServer mock;
+  auto udpPort = mock.listenUdp();
+  if (!udpPort) SKIP("loopback UDP refused: " + updclient::formatError(udpPort.error()));
+  DiscoveryOptions options = quickDiscovery();
+  options.broadcastAddress = "127.0.0.1";
+  options.port = *udpPort;
+  options.queryNames = false;
+  XbdmDiscovery discovery({}, options);
+  std::stop_source source;
+  std::thread stopper([&] {
+    std::this_thread::sleep_for(200ms);
+    source.request_stop();
+  });
+  const auto start = std::chrono::steady_clock::now();
+  auto devices = discovery.discover(10s, false, source.get_token());
+  const auto elapsed = std::chrono::steady_clock::now() - start;
+  stopper.join();
+  REQUIRE_OK(devices);
+  REQUIRE_EQ(devices->size(), size_t{1});
+  CHECK_EQ(devices->front().info.at("port"), std::to_string(*udpPort));
+  CHECK(elapsed < 2s);
 }
 
 TEST(XbdmDiscoveryIntegration, IdentifyByAddress) {

@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <stop_token>
 #include <thread>
 
 using namespace updclient;
@@ -164,4 +165,26 @@ TEST(DiscoveryRegistry, ConcurrentAddAndEnumerate) {
   for (auto &thread : threads) thread.join();
   CHECK_EQ(failures.load(), 0);
   CHECK_EQ(registry.providers().size(), size_t{12});
+}
+
+TEST(DiscoveryRegistry, AStopSkipsTheRemainingProviders) {
+  DiscoveryRegistry registry;
+  std::stop_source source;
+  auto first = std::make_unique<StubProvider>("a", std::vector<std::string>{"1.1.1.1"});
+  auto second = std::make_unique<StubProvider>("b", std::vector<std::string>{"2.2.2.2"});
+  auto *a = first.get();
+  auto *b = second.get();
+  registry.add(std::move(first));
+  registry.add(std::move(second));
+
+  source.request_stop();
+  auto none = registry.discoverAll(10ms, false, source.get_token());
+  REQUIRE_OK(none);
+  CHECK(none->empty());
+  CHECK_EQ(a->calls, 0);
+  CHECK_EQ(b->calls, 0);
+
+  auto all = registry.discoverAll(10ms, false, std::stop_token());
+  REQUIRE_OK(all);
+  CHECK_EQ(all->size(), size_t{2});
 }
