@@ -279,6 +279,11 @@ XBDM_LINK_TEST(XbdmIntegration, RenameAndMove) {
   CHECK_EQ(statusOf(client.rename("HDD:\\nothing", "HDD:\\other")).value_or(0), 402);
   CHECK_EQ(statusOf(client.rename("FLASH:\\kernel.bin", "FLASH:\\k.bin")).value_or(0), 414);
   CHECK(client.isConnected());
+  REQUIRE_OK(client.rename("HDD:\\Content\\moved.xex", "HDD:\\Content\\MOVED.XEX"));
+  auto listing = client.list("HDD:\\Content");
+  REQUIRE_OK(listing);
+  CHECK(std::any_of(listing->entries.begin(), listing->entries.end(),
+                    [](const updclient::xbdm::DirEntry &entry) { return entry.name == "MOVED.XEX"; }));
 }
 
 XBDM_LINK_TEST(XbdmIntegration, Memory) {

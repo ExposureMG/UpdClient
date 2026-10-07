@@ -625,19 +625,24 @@ ExecState execStateOf(std::string_view word) {
   return ExecState::Unknown;
 }
 
-// ".<8 hex digits>.part"
-std::string randomPartSuffix() {
+// ".<8 hex digits><extension>"
+std::string randomSuffix(std::string_view extension) {
   static std::atomic<uint32_t> counter{0};
   std::random_device device;
   const uint32_t token = device() ^ (counter.fetch_add(1) * 0x9E3779B9u);
   static constexpr char digits[] = "0123456789abcdef";
   std::string suffix = ".";
   for (int shift = 28; shift >= 0; shift -= 4) suffix.push_back(digits[(token >> shift) & 0xF]);
-  return suffix + ".part";
+  return suffix + std::string(extension);
 }
 
-std::string temporaryName(std::string_view finalName) {
-  const std::string suffix = randomPartSuffix();
+// ".<8 hex digits>.part"
+std::string randomPartSuffix() {
+  return randomSuffix(".part");
+}
+
+std::string temporaryName(std::string_view finalName, std::string_view extension = ".part") {
+  const std::string suffix = randomSuffix(extension);
   const size_t room = kMaxFileNameBytes - suffix.size();
   std::string name(finalName.substr(0, room));
   return name + suffix;
@@ -1368,6 +1373,51 @@ Result<void> readMemoryText(Session &session, uint32_t address, uint32_t length,
   return {};
 }
 
+// A new name that differs only in case: the target "exists" because FATX ignores
+// case, so no existence check. Whether the console takes such a rename at once is
+// not known (section 3.10); after a 410 or 400, the answers for an existing name,
+// it goes through an intermediate name in the same folder.
+Result<void> renameCase(Session &s, const std::string &source, const std::string &target, std::string line) {
+  const std::string context = "rename " + source;
+  auto direct = s.request(line, {status::kOk}, context);
+  if (direct) {
+    s.finishCommand();
+    return {};
+  }
+  const auto code = consoleStatusCode(direct.error());
+  if (code != status::kAlreadyExists && code != status::kUndefined) return unexpected<Error>(direct.error());
+
+  auto parent = parentOf(target);
+  auto name = nameOf(target);
+  if (!parent || !name) return unexpected<Error>(direct.error());
+  auto intermediate = joinPath(*parent, temporaryName(*name, ".ren"));
+  if (!intermediate) return unexpected<Error>(intermediate.error());
+  auto away = buildLine(Command("rename").text("name", source).text("newname", *intermediate), s);
+  auto into = buildLine(Command("rename").text("name", *intermediate).text("newname", target), s);
+  auto back = buildLine(Command("rename").text("name", *intermediate).text("newname", source), s);
+  if (!away || !into || !back) return unexpected<Error>(direct.error());
+
+  spdlog::debug("{}: {}; renaming through {}", context, formatError(direct.error()), *intermediate);
+  auto first = s.request(*away, {status::kOk}, context);
+  if (!first) return unexpected<Error>(first.error());
+  s.finishCommand();
+  auto second = s.request(*into, {status::kOk}, "rename " + *intermediate);
+  if (second) {
+    s.finishCommand();
+    return {};
+  }
+  Error error = second.error();
+  if (s.connected()) {
+    auto restored = s.request(*back, {status::kOk}, "rename " + *intermediate);
+    if (restored) {
+      s.finishCommand();
+      return unexpected<Error>(std::move(error));
+    }
+  }
+  error.message += "; the file is now named " + *intermediate;
+  return unexpected<Error>(std::move(error));
+}
+
 } // namespace
 
 Result<std::string> XbdmClient::debugName() {
@@ -1560,6 +1610,7 @@ Result<void> XbdmClient::rename(const std::string &from, const std::string &to) 
   }
   auto line = buildLine(Command("rename").text("name", *source).text("newname", *target), **s);
   if (!line) return unexpected<Error>(line.error());
+  if (*source != *target && sameName(*source, *target)) return renameCase(**s, *source, *target, std::move(*line));
 
   auto existing = attributes(*target);
   if (existing) return fail(ErrorCode::InvalidArgument, "rename: '" + *target + "' already exists");

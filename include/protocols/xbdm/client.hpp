@@ -405,7 +405,11 @@ public:
   // The folder must be empty.
   Result<void> removeDirectory(const std::string &path);
   // Within one drive. Fails with InvalidArgument when the new name exists (checked
-  // with getfileattributes before the rename is sent).
+  // with getfileattributes before the rename is sent). A new name that differs only
+  // in case is allowed: it is sent without the check, and if the console refuses it
+  // with 410 or 400 the file goes through an intermediate name in the same folder
+  // (three renames; when the last cannot be undone, the error names where the file
+  // is).
   Result<void> rename(const std::string &from, const std::string &to);
 
   // File transfers. expectedSize, when given (from a listing), bounds the length

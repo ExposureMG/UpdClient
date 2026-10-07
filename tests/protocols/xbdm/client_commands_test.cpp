@@ -365,6 +365,103 @@ TEST(XbdmClient, FileAttributes) {
   CHECK_EQ(console->problems(), std::string());
 }
 
+namespace {
+
+// The intermediate name of a case-only rename, from the command that used it.
+std::string intermediateIn(const std::string &command) {
+  const auto at = command.find("newname=\"");
+  if (at == std::string::npos) return {};
+  return command.substr(at + 9, command.size() - at - 10);
+}
+
+bool isIntermediate(const std::string &path) {
+  return path.rfind("HDD:\\A.txt.", 0) == 0 && path.size() > 4 && path.substr(path.size() - 4) == ".ren";
+}
+
+} // namespace
+
+TEST(XbdmClient, RenameThatChangesOnlyCase) {
+  auto console = FakeConsole::create();
+  console->on("rename name=\"HDD:\\a.txt\" newname=\"HDD:\\A.txt\"", "200- OK\r\n");
+  auto client = connected(console);
+  CHECK_OK(client.rename("HDD:\\a.txt", "HDD:\\A.txt"));
+  CHECK_EQ(console->commands().size(), size_t{1});
+  CHECK_EQ(console->problems(), std::string());
+}
+
+TEST(XbdmClient, CaseOnlyRenameFallsBackToTwoSteps) {
+  for (const std::string refusal : {"410- already exists", "400- unknown error"}) {
+    auto console = FakeConsole::create();
+    std::string intermediate;
+    console->handle([&](FakeConsole &c, const std::string &line) {
+      if (c.commands().size() == 1) {
+        c.line(refusal);
+      } else if (c.commands().size() == 2) {
+        intermediate = intermediateIn(line);
+        c.line("200- OK");
+      } else {
+        c.line("200- OK");
+      }
+    });
+    auto client = connected(console);
+    REQUIRE_OK(client.rename("HDD:\\a.txt", "HDD:\\A.txt"));
+    REQUIRE_EQ(console->commands().size(), size_t{3});
+    CHECK_MSG(isIntermediate(intermediate), intermediate);
+    CHECK_EQ(console->commands()[1], "rename name=\"HDD:\\a.txt\" newname=\"" + intermediate + "\"");
+    CHECK_EQ(console->commands()[2], "rename name=\"" + intermediate + "\" newname=\"HDD:\\A.txt\"");
+  }
+}
+
+TEST(XbdmClient, ACaseOnlyRenameRefusedWith414IsReturned) {
+  auto console = FakeConsole::create();
+  console->on("rename name=\"HDD:\\a.txt\" newname=\"HDD:\\A.txt\"", "414- access denied\r\n");
+  auto client = connected(console);
+  auto r = client.rename("HDD:\\a.txt", "HDD:\\A.txt");
+  REQUIRE_ERR(r, ErrorCode::Io);
+  expectStatus(r.error(), 414);
+  CHECK_EQ(console->commands().size(), size_t{1});
+  CHECK(client.isConnected());
+}
+
+TEST(XbdmClient, ACaseOnlyRenameThatCannotFinishGoesBack) {
+  auto console = FakeConsole::create();
+  std::string intermediate;
+  console->handle([&](FakeConsole &c, const std::string &line) {
+    const size_t n = c.commands().size();
+    if (n == 2) intermediate = intermediateIn(line);
+    c.line(n == 1 || n == 3 ? "410- already exists" : "200- OK");
+  });
+  auto client = connected(console);
+  auto r = client.rename("HDD:\\a.txt", "HDD:\\A.txt");
+  REQUIRE_ERR(r, ErrorCode::Io);
+  expectStatus(r.error(), 410);
+  REQUIRE_EQ(console->commands().size(), size_t{4});
+  CHECK_EQ(console->commands()[3], "rename name=\"" + intermediate + "\" newname=\"HDD:\\a.txt\"");
+  CHECK_MSG(r.error().message.find("now named") == std::string::npos, r.error().message);
+
+  // When going back fails too, the error says where the file is.
+  auto stuck = FakeConsole::create();
+  stuck->handle([&](FakeConsole &c, const std::string &line) {
+    const size_t n = c.commands().size();
+    if (n == 2) intermediate = intermediateIn(line);
+    c.line(n == 2 ? "200- OK" : "410- already exists");
+  });
+  auto other = connected(stuck);
+  auto lost = other.rename("HDD:\\a.txt", "HDD:\\A.txt");
+  REQUIRE_ERR(lost, ErrorCode::Io);
+  CHECK_EQ(stuck->commands().size(), size_t{4});
+  CHECK_MSG(lost.error().message.find("; the file is now named " + intermediate) != std::string::npos,
+            lost.error().message);
+}
+
+TEST(XbdmClient, RenameOntoItselfIsStillRefused) {
+  auto console = FakeConsole::create();
+  console->on("getfileattributes name=\"HDD:\\a.txt\"", "200- sizehi=0x0 sizelo=0x4\r\n");
+  auto client = connected(console);
+  CHECK_ERR(client.rename("HDD:\\a.txt", "HDD:\\a.txt"), ErrorCode::InvalidArgument);
+  CHECK_EQ(console->commands().size(), size_t{1});
+}
+
 TEST(XbdmClient, MakeDirectoryDeleteAndRename) {
   auto console = FakeConsole::create();
   console->on("mkdir name=\"HDD:\\New Folder\"", "200- OK\r\n")
