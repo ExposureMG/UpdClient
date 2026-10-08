@@ -13,6 +13,9 @@
 #include <net/transport.hpp>
 #include <net/transport_registry.hpp>
 #include <net/udp_socket.hpp>
+#include <protocols/jrpc/client.hpp>
+#include <protocols/jrpc/discovery.hpp>
+#include <protocols/jrpc/protocol.hpp>
 #include <protocols/updserver/client.hpp>
 #include <protocols/updserver/discovery.hpp>
 #include <protocols/updserver/protocol.hpp>
@@ -27,8 +30,9 @@ namespace updclient {
 
 // Registers the "tcp" transport and the built-in discovery providers with the
 // process-wide registries. Safe to call repeatedly and from several threads;
-// only the first call has an effect. XBDM is not among them: call
-// xbdm::registerXbdmScheme() or xbdm::registerXbdm() as well.
+// only the first call has an effect. XBDM and JRPC are not among them: call
+// xbdm::registerXbdmScheme() or xbdm::registerXbdm(), and jrpc::registerJrpcScheme(),
+// as well.
 UPDCLIENT_API void registerBuiltins();
 
 } // namespace updclient
