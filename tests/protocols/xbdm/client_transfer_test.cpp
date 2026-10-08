@@ -908,3 +908,23 @@ TEST(XbdmTransfer, KeptUploadsAreBounded) {
   CHECK_EQ(kept.size(), size_t{64});
   CHECK(std::find(kept.begin(), kept.end(), first) == kept.end());
 }
+
+TEST(XbdmTransfer, ARenameNotSentAfterTheDeleteIsSent) {
+  Files fs;
+  fs.files["HDD:\\x.txt"] = ut::bytesOf("old");
+  auto console = FakeConsole::create();
+  console->handle([&fs](FakeConsole &c, const std::string &line) {
+    fs.serve(c, line);
+    if (line == "delete name=\"HDD:\\x.txt\"") c.dropAfterWritten(c.written());
+  });
+  auto client = connected(console);
+  auto writer = client.openWrite("HDD:\\x.txt", 3);
+  REQUIRE_OK(writer);
+  REQUIRE_OK(writer->write(ut::bytesOf("new")));
+  REQUIRE(!writer->finish());
+  auto delivery = client.lastDelivery();
+  REQUIRE(delivery.has_value());
+  CHECK_EQ(delivery->command, std::string("rename"));
+  CHECK(delivery->delivery == Delivery::Sent);
+  CHECK_EQ(writer->keptPath().value_or(""), writer->temporaryPath());
+}

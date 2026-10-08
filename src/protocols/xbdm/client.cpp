@@ -38,6 +38,18 @@ constexpr size_t kMinBodyLineCharge = 64;
 // keptUploads stays bounded on a long-lived client; the oldest names go first.
 constexpr size_t kMaxKeptUploads = 64;
 
+// Commands that only read. Every other name, a raw command's included, may change the
+// console; dbgname with arguments sets the name.
+bool mayChangeTheConsole(std::string_view line) {
+  static constexpr std::string_view kReadOnly[] = {
+      "dbgname",  "consoletype", "getconsoleid",      "xbeinfo", "getexecstate", "altaddr",
+      "drivelist", "drivefreespace", "dirlist", "getfileattributes", "getfile", "getmem",
+      "getmemex", "walkmem", "modules", "modsections", "screenshot"};
+  const std::string_view name = line.substr(0, line.find(' '));
+  if (name == "dbgname") return name.size() != line.size();
+  return std::find(std::begin(kReadOnly), std::end(kReadOnly), name) == std::end(kReadOnly);
+}
+
 std::span<const uint8_t> bytesOf(std::string_view text) {
   return {reinterpret_cast<const uint8_t *>(text.data()), text.size()};
 }
@@ -198,6 +210,11 @@ struct Session {
   std::optional<CommandDelivery> delivery;
   uint64_t deliveries = 0;
   bool awaitingAnswer = false;
+  // Whether the current command may change the console, and whether an earlier
+  // command of the current call may already have (sent without an answer, or
+  // answered with success). Reset by beginCall().
+  bool commandChanges = false;
+  bool callChanged = false;
 
   bool connected() const noexcept { return transport && transport->isOpen(); }
   size_t buffered() const noexcept { return buffer.size() - bufferPos; }
@@ -336,11 +353,29 @@ struct Session {
     }
   }
 
-  // A new command, named by the first word of its line, that has not left yet.
+  // A public call begins: nothing it sends has happened yet.
+  void beginCall() noexcept { callChanged = false; }
+
+  // A new command, named by the first word of its line, that has not left yet. A
+  // changing command before it that went out without an answer may have happened.
   void beginCommand(std::string_view line) {
+    if (delivery && commandChanges &&
+        (delivery->delivery == Delivery::PartlySent || delivery->delivery == Delivery::Sent)) {
+      callChanged = true;
+    }
     delivery = CommandDelivery{std::string(line.substr(0, line.find(' '))), Delivery::NotSent};
+    commandChanges = mayChangeTheConsole(line);
     ++deliveries;
     awaitingAnswer = false;
+  }
+
+  // The last command's delivery, for the whole call: NotSent only when nothing the
+  // call sent can have changed the console.
+  std::optional<CommandDelivery> callDelivery() const {
+    if (!delivery) return std::nullopt;
+    CommandDelivery out = *delivery;
+    if (out.delivery == Delivery::NotSent && callChanged) out.delivery = Delivery::Sent;
+    return out;
   }
 
   // Its own writeSome loop, with the idle timeout and command deadline of
@@ -439,7 +474,10 @@ struct Session {
       return dropWith(ErrorCode::Protocol, "malformed status line '" + preview(*line) + "'", context);
     }
     lastStatus = *status;
-    if (awaitingAnswer && delivery) delivery->delivery = Delivery::Answered;
+    if (awaitingAnswer && delivery) {
+      delivery->delivery = Delivery::Answered;
+      if (commandChanges && status->isSuccess()) callChanged = true;
+    }
     awaitingAnswer = false;
     return *status;
   }
@@ -693,7 +731,7 @@ bool isRefusal(const Error &error) {
 Error withDeliveryNote(const Session &s, uint64_t deliveriesBefore, std::string_view command, Error error) {
   if (isRefusal(error) || s.deliveries == deliveriesBefore || !s.delivery) return error;
   if (s.delivery->command != command || s.delivery->delivery == Delivery::NotSent) {
-    error.message += "; the command was not sent";
+    error.message += s.callChanged ? "; an earlier step was carried out" : "; the command was not sent";
   } else if (s.delivery->delivery != Delivery::Answered) {
     error.message += "; the command was sent but not answered, so the console may have carried it out";
   }
@@ -1080,6 +1118,7 @@ Result<void> FileWriter::finish() {
     return fail(ErrorCode::InvalidArgument, s.context() + ": " + std::to_string(s.written) + " of " +
                                                 std::to_string(s.size) + " bytes written");
   }
+  session.beginCall();
 
   if (!s.confirmed) {
     if (!session.connected()) {
@@ -1320,7 +1359,7 @@ std::optional<StatusLine> XbdmClient::lastStatus() const {
 }
 
 std::optional<CommandDelivery> XbdmClient::lastDelivery() const {
-  return session_ ? session_->delivery : std::nullopt;
+  return session_ ? session_->callDelivery() : std::nullopt;
 }
 
 std::vector<std::string> XbdmClient::pendingCleanup() const {
@@ -1339,6 +1378,7 @@ Result<void> XbdmClient::reconnect() {
   if (!session_) return fail(ErrorCode::NotConnected, "the client was moved from");
   auto &s = *session_;
   if (s.transferActive) return fail(ErrorCode::InvalidArgument, std::string("reconnect: ") + std::string(kTransferBusy));
+  s.beginCall();
   if (!s.connector) return fail(ErrorCode::Unsupported, "reconnect: the client was attached without a connector");
   const uint64_t epoch = s.cancelEpoch;
   s.closeConnection();
@@ -1382,8 +1422,12 @@ void XbdmClient::cancel() noexcept {
 
 namespace {
 
+// Every public XbdmClient call starts here, which also starts the call's delivery.
+// Calls made from inside another (attributes() in rename(), openWrite() in
+// uploadFromFile()) come before anything changed.
 Result<Session *> sessionOf(const std::shared_ptr<Session> &session) {
   if (!session) return fail(ErrorCode::NotConnected, "the client was moved from");
+  session->beginCall();
   return session.get();
 }
 

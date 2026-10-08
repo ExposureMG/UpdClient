@@ -390,12 +390,15 @@ public:
   // The status line of the last answer, if there was one.
   std::optional<StatusLine> lastStatus() const;
   // The last command this client tried, internal ones included (the lookups and
-  // deletes of an upload, the steps of a rename, the cleanup of reconnect()), so for
-  // a call made of several commands it describes the last; nullopt before the
-  // first. After a failed call that changes something, NotSent means it is safe to
-  // repeat; PartlySent and Sent mean it may have happened. The messages of failed
-  // mkdir, delete, rename, setmem, setsystime, dvdeject and raw commands say the
-  // same in words.
+  // deletes of an upload, the steps of a rename, the cleanup of reconnect()); nullopt
+  // before the first. `command` names the last command, and `delivery` describes the
+  // call as a whole: NotSent means no command of the call that can change the
+  // console left the client, so a failed call is safe to repeat. Once an earlier step
+  // of the call may have taken effect (sent without an answer, or answered with
+  // success), the delivery is at least Sent, even if the last command was not sent.
+  // PartlySent and Sent mean the call may have changed something. The messages of
+  // failed mkdir, delete, rename, setmem, setsystime, dvdeject and raw commands say
+  // the same in words.
   std::optional<CommandDelivery> lastDelivery() const;
   // Temporary upload names left behind by aborted uploads, and by a sendfile whose
   // answer never arrived, deleted by reconnect().

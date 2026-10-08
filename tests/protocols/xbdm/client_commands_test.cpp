@@ -1010,3 +1010,59 @@ TEST(XbdmClient, SetMemorySaysHowMuchWasWrittenBeforeAFailure) {
   CHECK_MSG(r.error().message.find("the first 128 bytes were written") != std::string::npos, r.error().message);
   CHECK(sameDelivery(client.lastDelivery(), "setmem", Delivery::Sent));
 }
+
+TEST(XbdmClient, ACaseOnlyRenameThatStopsAfterTheIntermediateIsNotNotSent) {
+  auto console = FakeConsole::create();
+  console->handle([](FakeConsole &c, const std::string &) {
+    if (c.commands().size() == 1) {
+      c.line("410- already exists");
+      return;
+    }
+    // The move to the intermediate name is answered; then the connection goes
+    // before a byte of the last step leaves.
+    c.line("200- OK");
+    c.dropAfterWritten(c.written());
+  });
+  auto client = connected(console);
+  auto r = client.rename("HDD:\\a.txt", "HDD:\\A.txt");
+  REQUIRE(!r);
+  CHECK_EQ(console->commands().size(), size_t{2});
+  CHECK(sameDelivery(client.lastDelivery(), "rename", Delivery::Sent));
+  CHECK_MSG(r.error().message.find("not sent") == std::string::npos, r.error().message);
+  CHECK_MSG(r.error().message.find("an earlier step was carried out") != std::string::npos, r.error().message);
+}
+
+TEST(XbdmClient, SetMemoryIsNotSentOnlyWhenNoPieceWent) {
+  {
+    auto console = FakeConsole::create();
+    console->handle([](FakeConsole &c, const std::string &) {
+      c.line("200- set");
+      if (c.commands().size() == 2) c.dropAfterWritten(c.written());
+    });
+    auto client = connected(console);
+    REQUIRE(!client.setMemory(0x82000000u, ut::Bytes(200, 0xAB)));
+    CHECK_EQ(console->commands().size(), size_t{2});
+    CHECK(sameDelivery(client.lastDelivery(), "setmem", Delivery::Sent));
+  }
+  {
+    auto console = FakeConsole::create();
+    auto client = connected(console);
+    console->dropAfterWritten(console->written());
+    REQUIRE(!client.setMemory(0x82000000u, ut::Bytes(200, 0xAB)));
+    CHECK(console->commands().empty());
+    CHECK(sameDelivery(client.lastDelivery(), "setmem", Delivery::NotSent));
+  }
+}
+
+TEST(XbdmClient, AReadOnlyCallAfterAChangeStartsAfresh) {
+  auto console = FakeConsole::create();
+  console->handle([](FakeConsole &c, const std::string &) {
+    c.line("200- OK");
+    if (c.commands().size() == 1) c.dropAfterWritten(c.written());
+  });
+  auto client = connected(console);
+  REQUIRE_OK(client.makeDirectory("HDD:\\d"));
+  // A new call that fails before it sends anything is NotSent again.
+  CHECK(!client.removeFile("HDD:\\d"));
+  CHECK(sameDelivery(client.lastDelivery(), "delete", Delivery::NotSent));
+}
