@@ -15,13 +15,21 @@ A C++20 library and command line tool for talking to an Xbox 360 over the networ
 | UpdServer | TCP, default port 49. Discovery: UDP broadcast on port 48 | Console info and keys, NAND dump and raw block read/write/erase, bad block list, physical and hypervisor peek/poke, 1BL and bootloader dumps, file get/send, mount/unmount/mkdir, reboot/SMC reset/shutdown |
 | XeLL (Reloaded HTTPD) | HTTP/1.0 over TCP, default port 80. No discovery: you name the console | CPU key, DVD key and colours from the index page, NAND flash dump (`/FLASH`), fuse listing, keyvault (`/KV`, `/KVRAW`, `/KVRAW2`) |
 | XBDM (Xbox debug monitor: devkits, RGH/JTAG/Glitch2 consoles with an XBDM plugin, emulators that offer it) | Line protocol over TCP, port 730, scheme `xbdm://`. Discovery: UDP name protocol on port 730 | Console information, drives and free space, folder listings, file attributes, download and upload with 64-bit sizes, mkdir, delete, rename, memory read (`getmem`, `getmemex`) and write, memory regions, modules and sections, screenshot (raw frame buffer), reboot, launch, shutdown, tray, clock |
+| JRPC (the `JRPC.xex` console plugin; not JRPC2, which hooks XBDM) | Line protocol over TCP, port 1409, scheme `jrpc://`. No discovery: you name the console | Call any function on the console by address or module export and read its return (void, int, string, float, byte, int64, int/float/byte arrays of up to 8), resolve an export, CPU key, kernel version, console type, running title id, temperatures, notification, LEDs, constant memory write, shutdown. No memory or file access: use XBDM for that |
 
 Transports are looked up by URI scheme. Only `tcp` is built in; `xbdm` (TCP with port 730 as the
-default) is registered by `xbdm::registerXbdmScheme()`. Adding another (serial, USB, TLS) means adding
+default) is registered by `xbdm::registerXbdmScheme()`, and `jrpc` (port 1409) by `jrpc::registerJrpcScheme()`. Adding another (serial, USB, TLS) means adding
 files, see [docs/EXTENDING.md](docs/EXTENDING.md).
 
 The XBDM client follows [docs/XBDM_PROTOCOL.md](docs/XBDM_PROTOCOL.md), a contract written from
 third-party clients. It has been tested only against a mock console (`tests/support/xbdm_mock_server`).
+
+The JRPC client follows [docs/JRPC_PROTOCOL.md](docs/JRPC_PROTOCOL.md), a contract derived from a single
+server binary and a client for the sister plugin. It has been tested only against a mock console
+(`tests/support/jrpc_mock_server`) written from the same document, so a passing suite shows the client is
+consistent with the document, not that it works on a console. The design and the choices the document
+leaves open are in [docs/JRPC_ADAPTER_PLAN.md](docs/JRPC_ADAPTER_PLAN.md).
+
 ## Build
 
 Requirements: CMake 3.20 or newer and a C++20 compiler. The library needs only C++20 (`<span>`,
@@ -119,14 +127,17 @@ The XBDM tests also run the client against `tests/support/xbdm_mock_server.{hpp,
 console with fault injection, twice per test: over an in-memory pipe and over loopback TCP (a TCP variant
 is skipped with a message where sockets are refused). With the CLI built, `tests/cli/` runs the
 `updclient` executable against the same mock. `UPDCLIENT_XBDM_HUGE=1` adds a test that moves 4 GiB + 1
-in each direction over loopback (slow; it needs no disk space beyond a sparse file).
+in each direction over loopback (slow; it needs no disk space beyond a sparse file). The JRPC tests do the
+same against `tests/support/jrpc_mock_server.{hpp,cpp}`, a mock whose request parser is written from the
+protocol document and not from the client's builder.
 
 ## Using the library
 
 Link `UpdClient::updclient_lib` and include the umbrella header. Call `registerBuiltins()` once; it
 registers the `tcp` transport and the UpdServer discovery provider and is safe to call repeatedly.
 XBDM needs `xbdm::registerXbdm()` as well (the `xbdm` scheme and the XBDM discovery provider), or only
-`xbdm::registerXbdmScheme()`.
+`xbdm::registerXbdmScheme()`. JRPC has `jrpc::registerJrpcScheme()`; it is only needed to connect through
+the registry, because `JrpcClient::connect` handles `jrpc://` itself.
 
 ```cmake
 set(UPDCLIENT_BUILD_CLI OFF CACHE BOOL "")
@@ -219,6 +230,46 @@ int main() {
 }
 ```
 
+JRPC runs code on the console and answers one line per command. Failures that leave the stream in an
+unknown state close the connection; an `error=` answer does not:
+
+```cpp
+#include <updclient.hpp>
+
+#include <iostream>
+
+using namespace updclient;
+
+int main() {
+  auto endpoint = net::Endpoint::parse("jrpc://192.168.1.50");  // port 1409
+  if (!endpoint) return 2;
+  auto client = jrpc::JrpcClient::connect(*endpoint);
+  if (!client) {
+    std::cerr << formatError(client.error()) << "\n";  // Unsupported: a DEBUG line, JRPC is not installed
+    return 1;
+  }
+  if (auto title = client->currentTitleId()) std::cout << std::hex << *title << "\n";
+
+  // uint32_t xamGetCurrentTitleId(): module export xam.xex ordinal 463, on a system thread.
+  jrpc::CallSpec spec;
+  spec.target = jrpc::ByName{"xam.xex", 463};
+  spec.thread = jrpc::ThreadContext::System;
+  auto id = client->callUInt32(spec);
+  if (id) {
+    std::cout << "title " << std::hex << *id << "\n";
+  } else if (auto fault = jrpc::remoteFault(id.error())) {
+    std::cerr << "console answered error= (" << static_cast<int>(*fault) << ")\n";  // connection still usable
+  } else if (!client->isConnected()) {
+    // timeout, drop or a reply of the wrong shape: the call may still be running on the console.
+    // lastDelivery() says how far the command got; reconnect() is your decision.
+    std::cerr << formatError(id.error()) << "\n";
+  }
+
+  // jrpc::identify(endpoint) checks for the banner and sends no command; handy for "is JRPC here?".
+  return 0;
+}
+```
+
 Things to know:
 
 - `Result<T>` is `expected<T, Error>`. `Error` carries an `ErrorCode` (`Unknown`, `InvalidArgument`,
@@ -286,6 +337,29 @@ Things to know:
   `reconnect()` stuck in its TCP connect. Every answer is bounded as a whole as well as between
   bytes (the greeting by `greetingTimeout`, the answer to `bye` by `byeTimeout`, everything else but
   file data by `commandTimeout`), so a console that trickles bytes cannot hold a call indefinitely.
+- JRPC (`include/protocols/jrpc/client.hpp`, wire module in `protocol.hpp`): a reply has no status prefix, so
+  the client cannot resynchronise after anything unexpected. A timeout, a reply of the wrong shape for the
+  return kind that was asked for, an over-long line, a `DEBUG` line (`Unsupported`: JRPC is not
+  installed), stray bytes, a drop and `cancel()` close the connection and `reconnect()` is the caller's
+  decision. The one failure that keeps it is an `error=` answer: `ErrorCode::Io` with the console's text at
+  the end of the message, and `jrpc::remoteFault(error)` tells `CouldNotResolve`, `VersionMismatch`,
+  `ParametersNotFound` and `Other` apart (the texts are those of the JRPC2 build; the TCP server's wording
+  is unknown). A call that timed out may still be running on the console, so its connection is never
+  reused. `callTimeout` (default 60 s, 0 for none) bounds a whole call, `idleTimeout` the gaps in a reply.
+  A request is checked before anything is sent (at most 37 arguments, a command line of at most 8191 bytes,
+  array returns of 1 to 8 elements, no 64-bit array return) and `lastDelivery()` then reports `NotSent`.
+  `call()` takes a `CallSpec` (target by address or by module and ordinal, thread context, return kind,
+  `Arg` list); `callInt32`, `callUInt32`, `callByte`, `callInt64`, `callUInt64`, `callFloat`, `callString`,
+  `callBytes`, `callInts` and `callFloats` decode the reply, and a helper refuses a spec that asks for a
+  different return kind. Notifications, LED changes and constant memory writes may not be answered by the
+  console; with `silentOpBarrier` (on by default) the client sends a read-only `ConsoleType` behind each
+  and reads up to its answer, so the stream stays in step either way. `shutdown()` closes the connection
+  without `Bye`. The CPU key is two unpadded hex numbers run together, so `cpuKey()` accepts 16 or 32 digits
+  and reports any other length as `Protocol` with the raw text. The connection is kept when the reply is
+  hex digits alone (up to 32); any other shape closes it (what a real console prints is not known). `JrpcClient::cancel()` and `isConnected()` may be called from any thread. The
+  console serves 8 connections at a time; a 9th gets no banner and the connect ends in `Timeout`. JRPC
+  does not announce itself: `jrpc::identify(endpoint)` or `jrpc::JrpcProbeProvider` over a list of
+  candidates find it by address, and neither is registered by `registerBuiltins()`.
 - The library logs through spdlog, which stays out of the public headers. A library user can set
   their own default logger; the CLI sends it to stderr.
 
@@ -301,14 +375,14 @@ Global options may appear before or after the command.
 | --- | --- |
 | `-t, --target <uri>` | Target such as `tcp://192.168.1.5:49` or a bare IP. |
 | `-i, --ip <addr>` | Shortcut for a tcp target; mutually exclusive with `--target`. |
-| `-p, --port <n>` | UpdServer TCP port, default 49; for XBDM targets the TCP port, default 730. Rejected for `xell` commands. |
+| `-p, --port <n>` | UpdServer TCP port, default 49; for XBDM targets the TCP port, default 730; for JRPC targets 1409. Rejected for `xell` commands. |
 | `--xell-port <n>` | XeLL HTTP port, default 80. Rejected for UpdServer commands. |
 | `--timeout-ms <n>` | Connect and I/O timeout, 0 for none, default 5000. |
 | `--discovery-timeout-ms <n>` | How long discovery listens, default 3000. |
 | `-j, --json` | Print results and errors as one JSON document. |
 | `-v, --verbose` | Debug logging on stderr. |
 | `--yes` | Skip the confirmation required by destructive commands. |
-| `--trace <file>` | Append every XBDM command line and every line received to the file, with timings; file contents are never written, only their size. See [docs/HARDWARE_TEST_PLAN.md](docs/HARDWARE_TEST_PLAN.md). |
+| `--trace <file>` | Append every XBDM or JRPC command line and every line received to the file, with timings; file contents are never written, only their size. See [docs/HARDWARE_TEST_PLAN.md](docs/HARDWARE_TEST_PLAN.md). |
 | `--version`, `-h, --help` | Version and help (`updclient <command> --help` for a command). |
 
 Numbers accept decimal (`4096`) or `0x`-prefixed hex (`0x1000`). UpdServer commands use the `--target`
@@ -322,7 +396,15 @@ the first console found by XBDM discovery is used. Console paths are `HDD:\dir\f
 included (exit 1, `Cancelled`); an interrupted upload's temporary file is deleted over a new connection,
 or named in a warning, also when Ctrl-C arrives during that cleanup. During `discover`, or while the
 `xbdm` group looks for a console, Ctrl-C ends the search: `discover` prints what it found and exits 1.
-A failed XBDM command's `--json` error may carry `kept_upload` (an upload kept on the console as the only
+The `jrpc` group always speaks JRPC; a bare host (`--target 192.168.1.50` or `--ip`) means `jrpc://`,
+port 1409, and there is no discovery, so a missing target is a usage error (exit 2). With
+`--target jrpc://host[:port]` the shared `info` and `power shutdown` commands speak JRPC, while `mem`,
+`file`, `nand`, `version`, `power reboot` and `power smc-reset` refuse the target (JRPC has no memory,
+file, NAND or reboot commands; XBDM has memory and file commands). `--timeout-ms` sets the banner, idle and
+call timeouts together, so a `jrpc call` of a function that runs long needs a larger value, or 0. Ctrl-C
+cancels what is in progress, the connect and banner included (exit 1, `Cancelled`). A failed JRPC command
+that changes the console reports `command_delivery` as for XBDM, and an `error=` answer carries
+`remote_fault`. A failed XBDM command's `--json` error may carry `kept_upload` (an upload kept on the console as the only
 copy; rename it with `xbdm mv`) and `command_delivery` (`not_sent`, or `unknown` when the console may have
 carried the command out). Text the console sends
 (names, `info`, `xbdm raw` answers) is printed with control characters and bytes above 0x7E as `\xNN`;
@@ -331,9 +413,9 @@ carried the command out). Text the console sends
 | Command | Protocol | What it does | Confirms |
 | --- | --- | --- | --- |
 | `discover [--protocol all\|updserver\|xbdm]` | UpdServer and XBDM | List consoles that announce themselves (UpdServer) or answer the XBDM name query | |
-| `info` | UpdServer or XBDM | UpdServer: kernel version, NAND geometry, pairing data, CPU and DVD keys. XBDM: debug name, console type and id, running title, execution state, title address | |
+| `info` | UpdServer, XBDM or JRPC | UpdServer: kernel version, NAND geometry, pairing data, CPU and DVD keys. XBDM: debug name, console type and id, running title, execution state, title address. JRPC: as `jrpc info` | |
 | `version` | UpdServer | UpdServer version on the console | |
-| `power reboot` / `shutdown` | UpdServer or XBDM | Reboot (XBDM: warm `magicboot`) or shut down the console | yes |
+| `power reboot` / `shutdown` | UpdServer or XBDM; `shutdown` also JRPC | Reboot (XBDM: warm `magicboot`) or shut down the console | yes |
 | `power smc-reset` | UpdServer | SMC reset | yes |
 | `nand dump [-o file]` | UpdServer | Dump the full NAND (default `nanddump.bin`) | |
 | `nand badblocks` | UpdServer | List bad blocks | |
@@ -361,6 +443,17 @@ carried the command out). Text the console sends
 | `xbdm modules` / `xbdm regions` | XBDM | Loaded modules; committed memory regions (`walkmem`) | |
 | `xbdm eject` | XBDM | Open the disc tray | |
 | `xbdm raw '<line>'` | XBDM | Send one command line as typed and print the answer, for diagnostics (binary answers are not read) | yes |
+| `jrpc ping` | JRPC | Check that JRPC is installed: connect, read the banner, say `Bye`; no command is sent | |
+| `jrpc info` | JRPC | Kernel version, console type, running title id, CPU key and temperatures; a field the console does not answer is `null` (text: `(not answered)`) with a warning | |
+| `jrpc resolve <module> <ordinal>` | JRPC | Address of an export of a loaded module | |
+| `jrpc cpukey` / `kernel` / `console-type` / `title-id` | JRPC | Read one value | |
+| `jrpc temp [cpu\|gpu\|edram\|board\|all]` | JRPC | Raw sensor value as the console reports it (unit not documented) | |
+| `jrpc notify <text> [--type n]` | JRPC | Show a notification on the console | |
+| `jrpc leds <tl> <tr> <bl> <br>` | JRPC | Set the four ring LEDs (`off`, `red`, `green`, `orange` or a raw number each) | yes |
+| `jrpc shutdown` | JRPC | Shut the console down; the console does not answer | yes |
+| `jrpc constmem <address> <value> [--if-value v] [--in-title id]` | JRPC | Register a task that keeps writing a word; this client cannot remove it | yes |
+| `jrpc call <addr\|module!ordinal> [--system] [--returns void\|int\|str\|float\|byte\|int64\|ints\|floats\|bytes] [--count n] [--arg type:value]...` | JRPC | Call a function. `--arg` is repeatable: `i32`, `u32`, `bool`, `byte`, `i64`, `u64`, `f32`, `f64`, `str`, `bytes` (hex), `ints`, `floats` (comma separated). The whole request is checked before anything is sent | yes |
+| `jrpc raw '<line>'` | JRPC | Send one command line as typed and print the reply line; an `error=` reply is printed as an answer (exit 0), for diagnostics | yes |
 
 Destructive commands print a warning and require typing `yes` on an interactive terminal. Without a
 terminal they fail with a usage error unless `--yes` is given.
@@ -380,6 +473,10 @@ updclient --target xbdm://192.168.1.50 file get 'HDD:\Content\save.bin' save.bin
 updclient --target xbdm://192.168.1.50 file send game.xex /HDD/Games/Test/default.xex
 updclient --target xbdm://192.168.1.50 --yes xbdm launch /HDD/Games/Test/default.xex
 updclient --ip 192.168.1.50 xbdm ls /HDD --json
+updclient --ip 192.168.1.50 jrpc ping
+updclient --target jrpc://192.168.1.50 jrpc info --json
+updclient --ip 192.168.1.50 --yes jrpc call xam.xex!463 --system --returns int
+updclient --ip 192.168.1.50 --yes jrpc call 0x82010000 --returns int --arg i32:5 --arg str:hi
 updclient --target xbdm://192.168.1.50 --trace xbdm-trace.txt xbdm drives
 ```
 
@@ -388,7 +485,7 @@ updclient --target xbdm://192.168.1.50 --trace xbdm-trace.txt xbdm drives
 | Code | Meaning |
 | --- | --- |
 | 0 | Success (also `--help` and `--version`) |
-| 1 | Runtime or transport error, including a declined confirmation, an XBDM refusal (4xx), a name already in use (`AlreadyExists`, for example `xbdm mv` onto an existing name) and a cancelled transfer |
+| 1 | Runtime or transport error, including a declined confirmation, an XBDM refusal (4xx), a JRPC `error=` answer, a name already in use (`AlreadyExists`, for example `xbdm mv` onto an existing name) and a cancelled transfer |
 | 2 | Usage error: bad arguments, `--target` with `--ip`, a destructive command without `--yes` and without a terminal, `xell` without a target, a scheme with no registered transport, or any library `InvalidArgument` error |
 | 3 | Discovery found nothing, or discovery is unavailable (for example the UDP port cannot be bound) |
 
@@ -407,7 +504,9 @@ command somehow produced one, is dropped):
   when there is one. `code` is an `ErrorCode` name (`ConnectFailed`, `Timeout`, `Protocol`, ...) or
   one of `Usage`, `DiscoveryFailed`, `NoDevices`, `Aborted`. When an XBDM console refused the command,
   `"console_status": 402` (the 4xx code) appears instead of `os_error`, and the message ends with the
-  console's line.
+  console's line. When a JRPC console answered `error=`, `"remote_fault"` (`could_not_resolve`,
+  `version_mismatch`, `parameters_not_found` or `other`) appears instead, with the console's text at the end
+  of the message.
 - Commands the console does not acknowledge (`power *`, `nand erase-block`, `nand write-block`,
   `mem poke`, `mem hvpoke`, `file send`, `file mount`, `file unmount`, `file mkdir`) include
   `"acknowledged": false`. It means "sent", not "done"; verify with a follow-up read. XBDM answers
