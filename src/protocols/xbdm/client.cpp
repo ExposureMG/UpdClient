@@ -1558,27 +1558,46 @@ Result<void> renameCase(Session &s, const std::string &source, const std::string
   if (!away || !into || !back) return unexpected<Error>(direct.error());
 
   spdlog::debug("{}: {}; renaming through {}", context, formatError(direct.error()), *intermediate);
+  // Once the fallback began, every failure says where the file is, from how far each
+  // step got: a refused or unsent step left it where it was, an unanswered one may
+  // have moved it.
+  enum class Step { Done, Refused, NotSent, Unanswered };
+  auto stepOf = [&s](const Result<StatusLine> &r) {
+    if (r) return Step::Done;
+    if (isRefusal(r.error())) return Step::Refused;
+    if (s.delivery && s.delivery->delivery == Delivery::NotSent) return Step::NotSent;
+    return Step::Unanswered;
+  };
+  auto located = [](Error error, const std::string &where) {
+    error.message += "; the file is " + where;
+    return unexpected<Error>(std::move(error));
+  };
+
   auto first = s.request(*away, {status::kOk}, context);
-  if (!first) return unexpected<Error>(first.error());
-  s.finishCommand();
+  switch (stepOf(first)) {
+  case Step::Done: s.finishCommand(); break;
+  case Step::Refused:
+  case Step::NotSent: return located(first.error(), "still named " + source);
+  case Step::Unanswered: return located(first.error(), "named " + source + " or " + *intermediate);
+  }
+
   auto second = s.request(*into, {status::kOk}, "rename " + *intermediate);
-  if (second) {
-    s.finishCommand();
-    return {};
+  switch (stepOf(second)) {
+  case Step::Done: s.finishCommand(); return {};
+  case Step::NotSent: return located(second.error(), "now named " + *intermediate);
+  case Step::Unanswered: return located(second.error(), "named " + *intermediate + " or " + target);
+  case Step::Refused: break;
   }
-  Error error = second.error();
-  // Without an answer to a step, the file may be under either name.
-  bool certain = isRefusal(error);
-  if (s.connected()) {
-    auto restored = s.request(*back, {status::kOk}, "rename " + *intermediate);
-    if (restored) {
-      s.finishCommand();
-      return unexpected<Error>(std::move(error));
-    }
-    certain = certain && isRefusal(restored.error());
+
+  // Refused, so the connection is still usable: put the file back.
+  auto restored = s.request(*back, {status::kOk}, "rename " + *intermediate);
+  switch (stepOf(restored)) {
+  case Step::Done: s.finishCommand(); return located(second.error(), "still named " + source);
+  case Step::Refused:
+  case Step::NotSent: return located(second.error(), "now named " + *intermediate);
+  case Step::Unanswered: return located(second.error(), "named " + *intermediate + " or " + source);
   }
-  error.message += (certain ? "; the file is now named " : "; the file may now be named ") + *intermediate;
-  return unexpected<Error>(std::move(error));
+  return located(second.error(), "named " + *intermediate + " or " + source);
 }
 
 } // namespace
@@ -1774,7 +1793,7 @@ Result<void> XbdmClient::rename(const std::string &from, const std::string &to) 
   if (!source) return unexpected<Error>(source.error());
   auto target = filePath(to);
   if (!target) return unexpected<Error>(target.error());
-  if (*driveOf(*source) != *driveOf(*target)) {
+  if (!sameName(*driveOf(*source), *driveOf(*target))) {
     return fail(ErrorCode::InvalidArgument, "rename: '" + *source + "' and '" + *target + "' are on different drives");
   }
   auto line = buildLine(Command("rename").text("name", *source).text("newname", *target), **s);

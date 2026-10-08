@@ -1066,3 +1066,67 @@ TEST(XbdmClient, AReadOnlyCallAfterAChangeStartsAfresh) {
   CHECK(!client.removeFile("HDD:\\d"));
   CHECK(sameDelivery(client.lastDelivery(), "delete", Delivery::NotSent));
 }
+
+TEST(XbdmClient, ACaseOnlyRenameThatDoesNotFinishSaysWhereTheFileIs) {
+  // What the console does to the steps after the first rename's 410: "ok" answers,
+  // "refuse" answers 410, "hang" closes without an answer, "cut" answers and closes
+  // before the next line can leave.
+  struct Case {
+    std::vector<std::string> steps;
+    std::string where; // with S, I and T for source, intermediate and target
+  };
+  const std::vector<Case> cases = {
+      {{"refuse"}, "still named S"},
+      {{"cut-first"}, "still named S"},
+      {{"hang"}, "named S or I"},
+      {{"cut"}, "now named I"},
+      {{"ok", "hang"}, "named I or T"},
+      {{"ok", "refuse", "ok"}, "still named S"},
+      {{"ok", "refuse", "refuse"}, "now named I"},
+      {{"ok", "refuse", "hang"}, "named I or S"},
+  };
+  for (const auto &test : cases) {
+    auto console = FakeConsole::create();
+    std::string intermediate;
+    console->handle([&](FakeConsole &c, const std::string &line) {
+      const size_t n = c.commands().size();
+      if (n == 1) {
+        c.line("410- already exists");
+        if (test.steps[0] == "cut-first") c.dropAfterWritten(c.written());
+        return;
+      }
+      if (n == 2) intermediate = intermediateIn(line);
+      const std::string &step = test.steps[n - 2];
+      if (step == "refuse") {
+        c.line("410- already exists");
+      } else if (step == "hang") {
+        c.hangUp();
+      } else {
+        c.line("200- OK");
+        if (step == "cut") c.dropAfterWritten(c.written());
+      }
+    });
+    auto client = connected(console);
+    auto r = client.rename("HDD:\\a.txt", "HDD:\\A.txt");
+    REQUIRE(!r);
+    std::string where = "; the file is " + test.where;
+    auto put = [&](const std::string &key, const std::string &value) {
+      for (size_t at = where.find(key); at != std::string::npos; at = where.find(key, at + value.size())) {
+        where.replace(at, key.size(), value);
+      }
+    };
+    put(" S", " HDD:\\a.txt");
+    put(" I", " " + intermediate);
+    put(" T", " HDD:\\A.txt");
+    CHECK_MSG(r.error().message.find(where) != std::string::npos, where + " in: " + r.error().message);
+  }
+}
+
+TEST(XbdmClient, RenameComparesDrivesWithoutCase) {
+  auto console = FakeConsole::create();
+  console->on("getfileattributes name=\"HDD:\\b.txt\"", "402- file not found\r\n")
+      .on("rename name=\"hdd:\\a.txt\" newname=\"HDD:\\b.txt\"", "200- OK\r\n");
+  auto client = connected(console);
+  CHECK_OK(client.rename("hdd:\\a.txt", "HDD:\\b.txt"));
+  CHECK_EQ(console->problems(), std::string());
+}
