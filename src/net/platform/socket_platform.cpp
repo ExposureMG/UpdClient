@@ -65,13 +65,20 @@ bool isDisconnectError(int err) noexcept {
 #endif
 }
 
-bool isConnectTimeoutError(int err) noexcept {
+// The OS error a connect that timed out carries, also when the timeout was ours.
 #if defined(UPDCLIENT_PLATFORM_WINSOCK)
-  return err == WSAETIMEDOUT;
+constexpr int kTimedOutError = WSAETIMEDOUT;
 #else
-  return err == ETIMEDOUT;
+constexpr int kTimedOutError = ETIMEDOUT;
 #endif
+
+} // namespace
+
+int timedOutError() noexcept {
+  return kTimedOutError;
 }
+
+namespace {
 
 #if defined(UPDCLIENT_PLATFORM_WINSOCK) && !defined(IPV6_JOIN_GROUP) && defined(IPV6_ADD_MEMBERSHIP)
 #define IPV6_JOIN_GROUP IPV6_ADD_MEMBERSHIP
@@ -406,6 +413,8 @@ Result<std::vector<SocketAddress>> lookup(const std::string &hostText, uint16_t 
                           (numeric ? " (numeric IP address required)" : "") + ": " + text);
   }
 
+  // A name listed twice (localhost in /etc/hosts, say) yields the same address twice;
+  // each is kept once, in the resolver's order.
   std::vector<SocketAddress> out;
   for (const addrinfo *ai = list; ai != nullptr; ai = ai->ai_next) {
     if (ai->ai_addr == nullptr || static_cast<size_t>(ai->ai_addrlen) > sizeof(sockaddr_storage)) {
@@ -414,7 +423,10 @@ Result<std::vector<SocketAddress>> lookup(const std::string &hostText, uint16_t 
     SocketAddress address;
     std::memcpy(&address.storage, ai->ai_addr, ai->ai_addrlen);
     address.length = static_cast<SockLen>(ai->ai_addrlen);
-    out.push_back(address);
+    const bool repeated = std::any_of(out.begin(), out.end(), [&](const SocketAddress &known) {
+      return known.length == address.length && std::memcmp(&known.storage, &address.storage, address.length) == 0;
+    });
+    if (!repeated) out.push_back(address);
   }
   ::freeaddrinfo(list);
 
@@ -482,8 +494,9 @@ Result<std::vector<SocketAddress>> resolveBounded(std::string_view host, uint16_
     return fail(ErrorCode::Cancelled, "looking up '" + hostText + "' cancelled");
   }
   if (*waited == WaitResult::TimedOut) {
-    return fail(ErrorCode::Timeout, "looking up '" + hostText + "' timed out after " +
-                                        std::to_string(timeout.count()) + " ms");
+    return fail(ErrorCode::ConnectFailed,
+                "looking up '" + hostText + "' timed out after " + std::to_string(timeout.count()) + " ms",
+                kTimedOutError);
   }
   std::lock_guard<std::mutex> lock(slot->mutex);
   return std::move(*slot->result);
@@ -644,9 +657,9 @@ Result<void> connectWithTimeout(const Socket &socket, const SocketAddress &addre
     if (isInterrupted(err) || isConnectInProgress(err)) {
       inProgress = true;
     } else {
-      ErrorCode code = isConnectTimeoutError(err) ? ErrorCode::Timeout : ErrorCode::ConnectFailed;
-      return fail(code, "connect to " + addressToString(address) + ":" +
-                            std::to_string(addressPort(address)) + " failed: " + errorToString(err),
+      return fail(ErrorCode::ConnectFailed, "connect to " + addressToString(address) + ":" +
+                                                std::to_string(addressPort(address)) + " failed: " +
+                                                errorToString(err),
                   err);
     }
   }
@@ -659,9 +672,10 @@ Result<void> connectWithTimeout(const Socket &socket, const SocketAddress &addre
                                             std::to_string(addressPort(address)) + " cancelled");
     }
     if (*ready == WaitResult::TimedOut) {
-      return fail(ErrorCode::Timeout, "connect to " + addressToString(address) + ":" +
-                                          std::to_string(addressPort(address)) + " timed out after " +
-                                          std::to_string(timeout.count()) + " ms");
+      return fail(ErrorCode::ConnectFailed, "connect to " + addressToString(address) + ":" +
+                                                std::to_string(addressPort(address)) + " timed out after " +
+                                                std::to_string(timeout.count()) + " ms",
+                  kTimedOutError);
     }
     int soError = 0;
     SockLen length = static_cast<SockLen>(sizeof(soError));
@@ -670,9 +684,9 @@ Result<void> connectWithTimeout(const Socket &socket, const SocketAddress &addre
       soError = lastError();
     }
     if (soError != 0) {
-      ErrorCode code = isConnectTimeoutError(soError) ? ErrorCode::Timeout : ErrorCode::ConnectFailed;
-      return fail(code, "connect to " + addressToString(address) + ":" +
-                            std::to_string(addressPort(address)) + " failed: " + errorToString(soError),
+      return fail(ErrorCode::ConnectFailed, "connect to " + addressToString(address) + ":" +
+                                                std::to_string(addressPort(address)) + " failed: " +
+                                                errorToString(soError),
                   soError);
     }
   }

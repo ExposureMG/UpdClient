@@ -22,8 +22,12 @@ namespace updclient::net {
 // by its timeout.
 class UPDCLIENT_API TcpTransport final : public ITransport {
 public:
-  // Endpoint::port must be non-zero. Endpoint::timeout bounds the connect and
-  // becomes the initial read/write timeout; the timeout applies to each call.
+  // Endpoint::port must be non-zero. Endpoint::timeout bounds the whole connect, the
+  // name lookup and every resolved address together (an address listed twice is
+  // tried once), and becomes the initial read/write timeout, which applies to each
+  // call. Every failure to make the connection, a timeout included, is
+  // ErrorCode::ConnectFailed (a timeout with ETIMEDOUT, WSAETIMEDOUT on Windows, as
+  // sysError); a host name that does not exist is InvalidArgument.
   static Result<TransportPtr> connect(const Endpoint &endpoint);
   // As above; a stop request ends the connect at once with ErrorCode::Cancelled. A
   // token that is already stopped fails before anything is sent. The token is used

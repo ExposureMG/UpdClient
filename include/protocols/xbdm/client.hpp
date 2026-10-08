@@ -349,7 +349,11 @@ public:
   // xbdm://host[:port] connects over TCP directly, port 730 by default. Any other
   // scheme, a bare host (tcp) included, goes through the TransportRegistry, so
   // registerBuiltins() must have registered tcp; a missing port becomes 730 there
-  // too. Endpoint::timeout bounds the TCP connect.
+  // too. Endpoint::timeout bounds the TCP connect, name lookup included.
+  // Before a client exists the codes mean: ConnectFailed, no connection could be made
+  // (refused, unreachable, timed out, resolver failure); InvalidArgument, a bad
+  // endpoint or a host name that does not exist; Timeout, Protocol or LimitExceeded
+  // (401), connected but no usable greeting; Cancelled, stopped.
   static Result<XbdmClient> connect(const net::Endpoint &endpoint, ClientOptions options = {});
   // As above; a stop request ends the connect (xbdm and bare hosts: the TCP connect
   // and its name lookup; other schemes: checked before and after the registry's

@@ -128,8 +128,10 @@ Result<std::vector<SocketAddress>> resolve(std::string_view host, uint16_t port,
                                            bool passive, int family = kDefaultFamily);
 // For a client connect: numeric hosts are parsed in place; any other host name is looked
 // up (IPv4 only, like resolve) on a short-lived thread. The wait ends with ErrorCode::
-// Timeout after timeout (non-positive: no limit) or ErrorCode::Cancelled when wake (which
-// may be null) is signalled; the thread then finishes on its own and discards its result.
+// ConnectFailed (sysError timedOutError()) after timeout (non-positive: no limit) or
+// ErrorCode::Cancelled when wake (which may be null) is signalled; the thread then
+// finishes on its own, holding the socket runtime, and discards its result. Repeated
+// addresses are returned once.
 // A name that does not exist is InvalidArgument; a resolver that fails or cannot be
 // reached is ConnectFailed.
 Result<std::vector<SocketAddress>> resolveBounded(std::string_view host, uint16_t port, int type,
@@ -149,8 +151,13 @@ Result<void> joinMulticast(const Socket &socket, const SocketAddress &group,
 Result<void> bindSocket(const Socket &socket, const SocketAddress &address);
 Result<uint16_t> localPort(const Socket &socket);
 
-// A non-positive timeout waits indefinitely. Fails with ErrorCode::Timeout. A signalled
-// wake (which may be null) ends the wait at once with ErrorCode::Cancelled.
+// ETIMEDOUT, or WSAETIMEDOUT on Winsock.
+int timedOutError() noexcept;
+
+// A non-positive timeout waits indefinitely. Every failure to connect, a timeout
+// included, is ErrorCode::ConnectFailed; a timeout carries timedOutError() as its
+// sysError. A signalled wake (which may be null) ends the wait at once with
+// ErrorCode::Cancelled.
 Result<void> connectWithTimeout(const Socket &socket, const SocketAddress &address,
                                 std::chrono::milliseconds timeout, const WakeSignal *wake = nullptr);
 // Zero polls without blocking; a negative timeout waits indefinitely. true if readable.

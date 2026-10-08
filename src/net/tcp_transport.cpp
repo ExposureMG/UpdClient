@@ -133,6 +133,14 @@ Result<TransportPtr> TcpTransport::connect(const Endpoint &endpoint, std::stop_t
   impl->wake = std::move(*wake);
   impl->timeout = std::max(timeout, std::chrono::milliseconds(0));
   Error lastFailure = makeError(ErrorCode::ConnectFailed, "no address to connect to");
+  // One deadline for the whole connect: the lookup and every address share it.
+  const auto started = std::chrono::steady_clock::now();
+  auto remaining = [&]() -> std::chrono::milliseconds {
+    if (timeout.count() <= 0) return std::chrono::milliseconds(0);
+    const auto left = timeout - std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now() - started);
+    return std::max(left, std::chrono::milliseconds(0));
+  };
 
   std::vector<platform::SocketAddress> addresses;
   {
@@ -151,12 +159,21 @@ Result<TransportPtr> TcpTransport::connect(const Endpoint &endpoint, std::stop_t
                                 "connect to " + std::string(host) + " cancelled");
         break;
       }
+      const auto left = remaining();
+      if (timeout.count() > 0 && left.count() == 0) {
+        lastFailure = makeError(ErrorCode::ConnectFailed,
+                                "connect to " + std::string(host) + " timed out after " +
+                                    std::to_string(timeout.count()) + " ms",
+                                platform::timedOutError());
+        break;
+      }
       auto socket = platform::createSocket(address.storage.ss_family, SOCK_STREAM);
       if (!socket) {
         lastFailure = socket.error();
         continue;
       }
-      if (auto r = platform::connectWithTimeout(*socket, address, timeout, &impl->wake); !r) {
+      if (auto r = platform::connectWithTimeout(*socket, address, timeout.count() > 0 ? left : timeout, &impl->wake);
+          !r) {
         lastFailure = r.error();
         if (lastFailure.code == ErrorCode::Cancelled) break;
         continue;

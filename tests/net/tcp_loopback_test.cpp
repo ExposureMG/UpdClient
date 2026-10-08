@@ -9,6 +9,7 @@
 #include <updclient.hpp>
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <memory>
 #include <mutex>
@@ -190,8 +191,26 @@ TEST(TcpTransport, ConnectTimeoutAgainstAFullBacklog) {
   const auto elapsed = std::chrono::steady_clock::now() - start;
 
   if (r.has_value()) SKIP("the kernel still accepted the connection; cannot simulate a connect timeout");
-  CHECK(r.error().code == ErrorCode::Timeout || r.error().code == ErrorCode::ConnectFailed);
+  // No connection was made: ConnectFailed, with the OS's timeout error.
+  REQUIRE_ERR(r, ErrorCode::ConnectFailed);
+  CHECK_EQ(r.error().sysError, ETIMEDOUT);
+  CHECK_MSG(r.error().message.find("timed out") != std::string::npos, r.error().message);
   CHECK(elapsed < 5s);
+}
+
+TEST(TcpTransport, TheTimeoutBoundsTheWholeConnect) {
+  auto stalled = ut::StalledListener::start();
+  if (!stalled) SKIP("cannot set up a full accept queue here");
+  net::Endpoint endpoint = loopbackEndpoint(stalled->port(), 300ms);
+  // Some hosts files list localhost twice; the lookup and the connect share 300 ms.
+  endpoint.host = "localhost";
+  const auto start = std::chrono::steady_clock::now();
+  const auto r = net::TcpTransport::connect(endpoint);
+  const auto elapsed = std::chrono::steady_clock::now() - start;
+  if (r.has_value()) SKIP("the kernel still accepted the connection; cannot simulate a connect timeout");
+  if (r.error().code == ErrorCode::InvalidArgument) SKIP("'localhost' does not resolve here");
+  CHECK_ERR(r, ErrorCode::ConnectFailed);
+  CHECK(elapsed < 600ms);
 }
 
 TEST(TcpTransport, AStopEndsAConnectStuckOnAFullBacklog) {
