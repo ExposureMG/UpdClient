@@ -452,14 +452,24 @@ Result<std::vector<SocketAddress>> resolveBounded(std::string_view host, uint16_
   if (!done) return unexpected<Error>(done.error());
   slot->done = std::move(*done);
 
+  // The thread may outlive the caller, so it holds the socket runtime itself: on
+  // Winsock the slot's wake-up signal is a socket, and WSACleanup must not run before
+  // the thread has signalled and closed it.
+  auto runtime = RuntimeGuard::acquire();
+  if (!runtime) return unexpected<Error>(runtime.error());
+
   try {
-    std::thread([slot, hostText, port, type] {
+    std::thread([slot, hostText, port, type, runtime = std::optional<RuntimeGuard>(std::move(*runtime))]() mutable {
       auto result = lookup(hostText, port, type, false, kDefaultFamily, false, nullptr);
       {
         std::lock_guard<std::mutex> lock(slot->mutex);
         slot->result = std::move(result);
       }
       slot->done.signal();
+      // The capture order of a closure is unspecified: let the slot go, closing the
+      // signal if the caller already gave up, while the runtime is still held.
+      slot.reset();
+      runtime.reset();
     }).detach();
   } catch (const std::system_error &e) {
     return fail(ErrorCode::Io, "cannot start the name lookup for '" + hostText + "': " + e.what());

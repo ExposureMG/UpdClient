@@ -266,6 +266,23 @@ TEST(TcpTransport, AStopEndsAHostNameLookup) {
   CHECK_ERR(net::TcpTransport::connect(endpoint, source.get_token()), ErrorCode::Cancelled);
 }
 
+// The lookup thread may still run when its connect returns; it owns what it
+// touches, the socket runtime included. Stops land before, during and after lookups.
+TEST(TcpTransport, ALookupThatOutlivesItsConnectIsHarmless) {
+  for (int i = 0; i < 50; ++i) {
+    net::Endpoint endpoint = loopbackEndpoint(49, 30000ms);
+    endpoint.host = "no-such-host-" + std::to_string(i) + ".invalid";
+    std::stop_source source;
+    std::thread stopper([&source, i] {
+      std::this_thread::sleep_for(std::chrono::microseconds(100 * (i % 10)));
+      source.request_stop();
+    });
+    const auto r = net::TcpTransport::connect(endpoint, source.get_token());
+    stopper.join();
+    CHECK(!r.has_value());
+  }
+}
+
 TEST(TcpTransport, RejectsEndpointWithoutPort) {
   net::Endpoint e;
   e.scheme = "tcp";
