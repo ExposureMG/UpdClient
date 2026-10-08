@@ -16,7 +16,10 @@ struct TcpTransport::Impl {
   platform::RuntimeGuard runtime;
   platform::Socket socket;
   platform::WakeSignal wake;
+  // "<address>:<port>", and the two parts as numbers for peer().
   std::string peer;
+  std::string peerHost;
+  uint16_t peerPort = 0;
   std::chrono::milliseconds timeout{0};
 
   // close() may run on another thread while a read or write is in progress. The
@@ -184,7 +187,9 @@ Result<TransportPtr> TcpTransport::connect(const Endpoint &endpoint, std::stop_t
       }
       (void)platform::setNoDelay(*socket);
       impl->socket = std::move(*socket);
-      impl->peer = platform::addressToString(address) + ":" + std::to_string(port);
+      impl->peerHost = platform::addressToString(address);
+      impl->peerPort = port;
+      impl->peer = impl->peerHost + ":" + std::to_string(port);
       break;
     }
   }
@@ -220,6 +225,14 @@ void TcpTransport::close() noexcept {
 
 std::string TcpTransport::describe() const {
   return "tcp://" + impl_->peer;
+}
+
+Endpoint TcpTransport::peer() const {
+  Endpoint endpoint;
+  endpoint.scheme = "tcp";
+  endpoint.host = impl_->peerHost;
+  endpoint.port = impl_->peerPort;
+  return endpoint;
 }
 
 Result<void> TcpTransport::setTimeout(std::chrono::milliseconds timeout) {

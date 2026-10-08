@@ -1297,6 +1297,15 @@ std::string XbdmClient::describe() const {
   return session_->transport->describe();
 }
 
+std::optional<net::Endpoint> XbdmClient::peer() const {
+  if (!session_) return std::nullopt;
+  std::lock_guard<std::mutex> lock(session_->transportMutex);
+  if (!session_->connected()) return std::nullopt;
+  const auto *tcp = dynamic_cast<const net::TcpTransport *>(session_->transport.get());
+  if (!tcp) return std::nullopt;
+  return tcp->peer();
+}
+
 const ClientOptions &XbdmClient::options() const noexcept {
   static const ClientOptions defaults;
   return session_ ? session_->options : defaults;

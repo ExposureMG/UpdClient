@@ -41,6 +41,9 @@ public:
   bool isOpen() const noexcept override;
   void close() noexcept override;
   std::string describe() const override;
+  // The address actually connected, after name lookup: scheme "tcp", the numeric
+  // host and the port; timeout and options are the defaults. Unchanged by close().
+  Endpoint peer() const;
   Result<void> setTimeout(std::chrono::milliseconds timeout) override;
   Result<size_t> readSome(std::span<uint8_t> buffer) override;
   Result<size_t> writeSome(std::span<const uint8_t> data) override;

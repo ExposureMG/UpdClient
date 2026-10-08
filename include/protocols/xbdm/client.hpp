@@ -381,6 +381,10 @@ public:
   bool isConnected() const noexcept;
   bool transferActive() const noexcept;
   std::string describe() const;
+  // The numeric address of the console while connected over TcpTransport (connect(),
+  // or a connector that returns one); nullopt when not connected or over another
+  // transport. See TcpTransport::peer().
+  std::optional<net::Endpoint> peer() const;
   const ClientOptions &options() const noexcept;
   void setOptions(const ClientOptions &options);
   // The status line of the last answer, if there was one.

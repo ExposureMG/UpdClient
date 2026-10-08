@@ -264,6 +264,22 @@ TEST(TcpTransport, ConnectsByHostName) {
   CHECK((*r)->describe().find("127.0.0.1") != std::string::npos);
 }
 
+TEST(TcpTransport, PeerIsTheNumericAddress) {
+  auto server = startOrSkip([](ut::ServerConnection &, const std::atomic<bool> &) {});
+  net::Endpoint endpoint = loopbackEndpoint(server->port());
+  endpoint.host = "localhost";
+  const auto r = net::TcpTransport::connect(endpoint);
+  if (!r) SKIP("'localhost' does not resolve to an IPv4 address here: " + r.error().message);
+  const auto *tcp = dynamic_cast<const net::TcpTransport *>(r->get());
+  REQUIRE(tcp != nullptr);
+  const net::Endpoint peer = tcp->peer();
+  CHECK_EQ(peer.scheme, std::string("tcp"));
+  CHECK_EQ(peer.host, std::string("127.0.0.1"));
+  CHECK_EQ(peer.port, server->port());
+  (*r)->close();
+  CHECK_EQ(tcp->peer().host, std::string("127.0.0.1"));
+}
+
 TEST(TcpTransport, UnknownHostNameFailsWithinTheTimeout) {
   net::Endpoint endpoint = loopbackEndpoint(49, 2000ms);
   endpoint.host = "no-such-host.invalid"; // RFC 6761: never resolves

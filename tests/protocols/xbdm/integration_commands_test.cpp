@@ -263,6 +263,21 @@ XBDM_LINK_TEST(XbdmIntegration, Remove) {
   CHECK(client.isConnected());
 }
 
+XBDM_LINK_TEST(XbdmIntegration, PeerIsKnownOnlyOverTcp) {
+  Rig rig(link);
+  auto client = rig.client();
+  const auto peer = client.peer();
+  if (link == Link::Tcp) {
+    REQUIRE(peer.has_value());
+    CHECK_EQ(peer->host, std::string("127.0.0.1"));
+    CHECK_EQ(peer->port, rig.port());
+  } else {
+    CHECK(!peer.has_value());
+  }
+  client.close();
+  CHECK(!client.peer().has_value());
+}
+
 XBDM_LINK_TEST(XbdmIntegration, RenameAndMove) {
   Rig rig(link);
   auto client = rig.client();
