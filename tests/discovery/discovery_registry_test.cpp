@@ -36,8 +36,9 @@ public:
     return out;
   }
 
-  int calls = 0;
-  bool lastStopAfterFirst = false;
+  // ConcurrentAddAndEnumerate calls discover() on one provider from several threads.
+  std::atomic<int> calls{0};
+  std::atomic<bool> lastStopAfterFirst{false};
 
 private:
   std::string name_;
@@ -125,9 +126,9 @@ TEST(DiscoveryRegistry, StopAfterFirstStopsAtTheFirstProviderWithADevice) {
   auto found = registry.discoverAll(10ms, true);
   REQUIRE_OK(found);
   REQUIRE_EQ(found->size(), size_t{1});
-  CHECK_EQ(firstRaw->calls, 1);
+  CHECK_EQ(firstRaw->calls.load(), 1);
   CHECK(firstRaw->lastStopAfterFirst);
-  CHECK_EQ(secondRaw->calls, 0);
+  CHECK_EQ(secondRaw->calls.load(), 0);
 }
 
 TEST(DiscoveryRegistry, StopAfterFirstContinuesPastEmptyProviders) {
@@ -181,8 +182,8 @@ TEST(DiscoveryRegistry, AStopSkipsTheRemainingProviders) {
   auto none = registry.discoverAll(10ms, false, source.get_token());
   REQUIRE_OK(none);
   CHECK(none->empty());
-  CHECK_EQ(a->calls, 0);
-  CHECK_EQ(b->calls, 0);
+  CHECK_EQ(a->calls.load(), 0);
+  CHECK_EQ(b->calls.load(), 0);
 
   auto all = registry.discoverAll(10ms, false, std::stop_token());
   REQUIRE_OK(all);

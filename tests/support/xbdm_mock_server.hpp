@@ -370,10 +370,10 @@ public:
   std::optional<Bytes> answerNameRequest(std::span<const uint8_t> request) const;
   void setUdpMode(XbdmUdpMode mode);
   XbdmUdpMode udpMode() const;
-  // In-memory datagram sockets for the client's discovery. A sendTo() to port 730 at
-  // a broadcast address, or at `address`, is answered with a reply from `address`
-  // that the same socket's receive() returns.
-  updclient::net::DatagramSocketFactory datagramFactory(std::string address = "127.0.0.1");
+  // In-memory datagram sockets for the client's discovery. A sendTo() to `port` at a
+  // broadcast address, or at `address`, is answered with a reply from `address` and
+  // `port` that the same socket's receive() returns; other ports get nothing.
+  updclient::net::DatagramSocketFactory datagramFactory(std::string address = "127.0.0.1", uint16_t port = 730);
   // A real UDP responder through net::UdpSocket on 127.0.0.1; returns its port.
   updclient::Result<uint16_t> listenUdp();
   size_t nameRequestsSeen() const;

@@ -103,6 +103,26 @@ TEST(XbdmDiscoveryIntegration, ProbeOneAddress) {
   CHECK(!elsewhere->has_value());
 }
 
+TEST(XbdmDiscoveryIntegration, AConfiguredPortIsSearchedAndReported) {
+  XbdmMockServer mock;
+  DiscoveryOptions options = quickDiscovery();
+  options.port = 7300;
+  XbdmDiscovery onPort(mock.datagramFactory("127.0.0.1", 7300), options,
+                       [&mock](const updclient::net::Endpoint &) { return mock.connect(); });
+  auto devices = onPort.discover(200ms, true);
+  REQUIRE_OK(devices);
+  REQUIRE_EQ(devices->size(), size_t{1});
+  CHECK_EQ(devices->front().info.at("port"), std::string("7300"));
+  CHECK_EQ(devices->front().info.at("name"), std::string("MockDevkit"));
+
+  // A console on 7300 does not hear a search on 730.
+  XbdmDiscovery elsewhere(mock.datagramFactory("127.0.0.1", 7300), quickDiscovery(),
+                          [&mock](const updclient::net::Endpoint &) { return mock.connect(); });
+  auto none = elsewhere.discover(100ms, false);
+  REQUIRE_OK(none);
+  CHECK(none->empty());
+}
+
 TEST(XbdmDiscoveryIntegration, SilentAndMalformedReplies) {
   XbdmMockServer mock;
   for (const auto mode : {ut::XbdmUdpMode::Silent, ut::XbdmUdpMode::WrongType, ut::XbdmUdpMode::LengthBeyondDatagram}) {

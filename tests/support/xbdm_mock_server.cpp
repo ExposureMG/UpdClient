@@ -30,7 +30,6 @@ using updclient::Result;
 using updclient::fail;
 namespace net = updclient::net;
 
-constexpr uint16_t kNamePort = 730;
 constexpr size_t kChunk = 64 * 1024;
 
 std::string lower(std::string_view text) {
@@ -1541,8 +1540,9 @@ void startConnection(const std::shared_ptr<State> &st, net::TransportPtr transpo
 
 class MockDatagramSocket final : public net::IDatagramSocket {
 public:
-  MockDatagramSocket(std::function<std::optional<Bytes>(std::span<const uint8_t>)> answer, std::string address)
-      : answer_(std::move(answer)), address_(std::move(address)) {}
+  MockDatagramSocket(std::function<std::optional<Bytes>(std::span<const uint8_t>)> answer, std::string address,
+                     uint16_t port)
+      : answer_(std::move(answer)), address_(std::move(address)), port_(port) {}
 
   Result<void> bind(uint16_t, bool) override {
     bound_ = true;
@@ -1554,13 +1554,13 @@ public:
   }
   Result<size_t> sendTo(std::span<const uint8_t> data, std::string_view address, uint16_t port) override {
     if (!bound_) return fail(ErrorCode::NotConnected, "not bound");
-    if (port == kNamePort && (address == "255.255.255.255" || address == address_)) {
+    if (port == port_ && (address == "255.255.255.255" || address == address_)) {
       if (auto reply = answer_(data)) {
         std::lock_guard<std::mutex> lock(mutex_);
         net::Datagram d;
         d.data = std::move(*reply);
         d.senderAddress = address_;
-        d.senderPort = kNamePort;
+        d.senderPort = port_;
         queue_.push_back(std::move(d));
         changed_.notify_all();
       }
@@ -1581,6 +1581,7 @@ public:
 private:
   std::function<std::optional<Bytes>(std::span<const uint8_t>)> answer_;
   std::string address_;
+  uint16_t port_;
   bool bound_ = false;
   std::mutex mutex_;
   std::condition_variable changed_;
@@ -1835,10 +1836,10 @@ XbdmUdpMode XbdmMockServer::udpMode() const {
   return state_->udpMode;
 }
 
-net::DatagramSocketFactory XbdmMockServer::datagramFactory(std::string address) {
+net::DatagramSocketFactory XbdmMockServer::datagramFactory(std::string address, uint16_t port) {
   auto answer = [this](std::span<const uint8_t> request) { return answerNameRequest(request); };
-  return [answer, address]() -> std::unique_ptr<net::IDatagramSocket> {
-    return std::make_unique<MockDatagramSocket>(answer, address);
+  return [answer, address, port]() -> std::unique_ptr<net::IDatagramSocket> {
+    return std::make_unique<MockDatagramSocket>(answer, address, port);
   };
 }
 
