@@ -50,14 +50,18 @@ TEST(Error, ErrorCodeNamesMatchEnumerators) {
   CHECK_EQ(std::string(errorCodeName(ErrorCode::Protocol)), std::string("Protocol"));
   CHECK_EQ(std::string(errorCodeName(ErrorCode::LimitExceeded)), std::string("LimitExceeded"));
   CHECK_EQ(std::string(errorCodeName(ErrorCode::Cancelled)), std::string("Cancelled"));
+  CHECK_EQ(std::string(errorCodeName(ErrorCode::AlreadyExists)), std::string("AlreadyExists"));
 }
 
 TEST(Error, ErrorCodeNamesAreDistinct) {
   std::set<std::string> names;
-  for (int i = 0; i <= static_cast<int>(ErrorCode::Cancelled); ++i) {
+  for (int i = 0; i <= static_cast<int>(ErrorCode::AlreadyExists); ++i) {
     names.insert(errorCodeName(static_cast<ErrorCode>(i)));
   }
-  CHECK_EQ(names.size(), static_cast<size_t>(ErrorCode::Cancelled) + 1);
+  CHECK_EQ(names.size(), static_cast<size_t>(ErrorCode::AlreadyExists) + 1);
+  // Appended: every earlier value keeps its number.
+  CHECK_EQ(static_cast<int>(ErrorCode::Cancelled), 10);
+  CHECK_EQ(static_cast<int>(ErrorCode::AlreadyExists), 11);
 }
 
 TEST(Error, UnknownEnumValueFallsBackToUnknown) {

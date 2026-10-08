@@ -288,7 +288,7 @@ XBDM_LINK_TEST(XbdmIntegration, RenameAndMove) {
   CHECK_EQ(rig.mock.fileData("HDD:\\Content\\moved.xex")->size(), size_t{20000});
 
   rig.mock.clearCommands();
-  CHECK_ERR(client.rename("HDD:\\Content\\moved.xex", "HDD:\\Games"), ErrorCode::InvalidArgument);
+  CHECK_ERR(client.rename("HDD:\\Content\\moved.xex", "HDD:\\Games"), ErrorCode::AlreadyExists);
   CHECK_EQ(rig.linesNamed("rename").size(), size_t{0});
   CHECK_ERR(client.rename("HDD:\\Games", "DEVKIT:\\Games"), ErrorCode::InvalidArgument);
   CHECK_EQ(statusOf(client.rename("HDD:\\nothing", "HDD:\\other")).value_or(0), 402);

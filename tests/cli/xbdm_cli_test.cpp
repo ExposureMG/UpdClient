@@ -424,3 +424,11 @@ TEST(XbdmCli, CtrlCDuringDiscoveryPrintsWhatWasFound) {
   CHECK(std::chrono::steady_clock::now() - signalled < 2s);
   CHECK_MSG(run.exit == 1 && contains(run.err, "Cancelled"), describe(run));
 }
+
+TEST(XbdmCli, MovingOntoAnExistingNameIsAlreadyExists) {
+  CliRig cli;
+  auto run = cli.run({"--json", "xbdm", "mv", "HDD:\\default.xex", "HDD:\\Content"});
+  CHECK_MSG(run.exit == 1, describe(run));
+  CHECK_MSG(contains(run.out, "\"code\": \"AlreadyExists\""), describe(run));
+  CHECK(cli.rig.mock.entry("HDD:\\default.xex").has_value());
+}

@@ -272,8 +272,9 @@ private:
 // looks the final name up first (a folder there fails at once). write() sends the
 // bytes; finish() wants exactly size() of them, waits for the console's answer and
 // only then renames the temporary file to the final name, replacing a file of that
-// name only if one existed when openWrite() ran. A file that appeared meanwhile
-// fails finish() with InvalidArgument and is left alone; one that appears between
+// name only if one existed when openWrite() ran (replacesExisting()). A file that
+// appeared meanwhile fails finish() with AlreadyExists and is left alone; a folder
+// there fails with InvalidArgument, in openWrite() as in finish(); one that appears between
 // finish()'s own lookup and the rename cannot be told apart on a console whose
 // rename replaces (section 3.10). A refusal after the data, or a failed rename
 // while no file of the final name was deleted, deletes the temporary file on the
@@ -303,6 +304,9 @@ public:
   // The temporary path when finish() failed and kept it, as the only copy of either
   // version; nullopt otherwise, before finish() included.
   std::optional<std::string> keptPath() const noexcept;
+  // Whether a file of the final name existed when openWrite() ran, so that finish()
+  // replaces it; false for a moved-from writer.
+  bool replacesExisting() const noexcept;
 
   // More bytes than size() - written() is InvalidArgument; nothing is sent then.
   Result<void> write(std::span<const uint8_t> data);
@@ -449,7 +453,7 @@ public:
   Result<void> removeFile(const std::string &path);
   // The folder must be empty.
   Result<void> removeDirectory(const std::string &path);
-  // Within one drive (drive names compared without case). Fails with InvalidArgument
+  // Within one drive (drive names compared without case). Fails with AlreadyExists
   // when the new name exists (checked with getfileattributes before the rename is
   // sent). A new name that differs only in case is allowed: it is sent without the
   // check, and if the console refuses it with 410 or 400 the file goes through an
@@ -462,6 +466,8 @@ public:
   // the console may announce; a getfile length can only describe files below
   // 4 GiB, so an expectedSize of 4 GiB or more is Unsupported.
   Result<FileReader> openRead(const std::string &path, std::optional<uint64_t> expectedSize = std::nullopt);
+  // Fails with LimitExceeded, before anything is sent, when a command line the upload
+  // needs (the rename carries both names) would exceed maxCommandBytes.
   Result<FileWriter> openWrite(const std::string &path, uint64_t size);
   // Writes "<hostPath>.part" (or "<hostPath>.<random>.part" when that name is
   // taken) and renames it to hostPath after the last byte; a failed download

@@ -318,6 +318,7 @@ TEST(XbdmTransfer, UploadGoesToATemporaryNameAndIsRenamedAfterTheConsoleConfirme
   CHECK_EQ(writer->path(), std::string("HDD:\\Games\\a rather long file name for FATX.bin"));
   CHECK_EQ(console->lastCommand(), "sendfile name=\"" + temp + "\" length=0x249f0");
   CHECK(client.transferActive());
+  CHECK(!writer->replacesExisting());
   CHECK_ERR(client.debugName(), ErrorCode::InvalidArgument);
 
   CHECK_ERR(writer->finish(), ErrorCode::InvalidArgument);
@@ -353,6 +354,7 @@ TEST(XbdmTransfer, UploadReplacesAnExistingFile) {
   auto writer = client.openWrite("HDD:\\x.txt", 3);
   REQUIRE_OK(writer);
   REQUIRE_OK(writer->write(ut::bytesOf("new")));
+  CHECK(writer->replacesExisting());
   REQUIRE_OK(writer->finish());
   CHECK_EQ(fs.names(), std::vector<std::string>{"HDD:\\x.txt"});
   CHECK_EQ(fs.files["HDD:\\x.txt"], ut::bytesOf("new"));
@@ -563,7 +565,7 @@ TEST(XbdmTransfer, AFileThatAppearsDuringTheUploadIsNotReplaced) {
   const std::string temp = writer->temporaryPath();
   REQUIRE_OK(writer->write(ut::bytesOf("new")));
   auto r = writer->finish();
-  REQUIRE_ERR(r, ErrorCode::InvalidArgument);
+  REQUIRE_ERR(r, ErrorCode::AlreadyExists);
   CHECK_MSG(r.error().message.find("HDD:\\x.txt appeared during the upload and was not replaced; the upload was removed") !=
                 std::string::npos,
             r.error().message);
@@ -596,7 +598,7 @@ TEST(XbdmTransfer, AFileThatAppearsBeforeTheRenameIsNotReplaced) {
   const std::string temp = writer->temporaryPath();
   REQUIRE_OK(writer->write(ut::bytesOf("new")));
   auto r = writer->finish();
-  REQUIRE_ERR(r, ErrorCode::InvalidArgument);
+  REQUIRE_ERR(r, ErrorCode::AlreadyExists);
   CHECK_MSG(r.error().message.find("appeared during the upload") != std::string::npos, r.error().message);
   CHECK_EQ(fs.files["HDD:\\x.txt"], ut::bytesOf("theirs"));
   CHECK_EQ(fs.files.count(temp), size_t{0});
@@ -927,4 +929,22 @@ TEST(XbdmTransfer, ARenameNotSentAfterTheDeleteIsSent) {
   CHECK_EQ(delivery->command, std::string("rename"));
   CHECK(delivery->delivery == Delivery::Sent);
   CHECK_EQ(writer->keptPath().value_or(""), writer->temporaryPath());
+}
+
+TEST(XbdmTransfer, AnUploadWhoseRenameLineIsTooLongFailsBeforeAnything) {
+  // "sendfile name=<temp> length=0x3" takes 53 bytes with CR LF, the rename of the
+  // temporary name to HDD:\x.txt 61.
+  Files fs;
+  auto console = FakeConsole::create();
+  fs.install(*console);
+  ClientOptions options = xt::quickOptions();
+  options.maxCommandBytes = 56;
+  auto client = connected(console, options);
+  auto writer = client.openWrite("HDD:\\x.txt", 3);
+  REQUIRE_ERR(writer, ErrorCode::LimitExceeded);
+  CHECK_MSG(writer.error().message.find("sendfile HDD:\\x.txt") != std::string::npos, writer.error().message);
+  CHECK(console->commands().empty());
+  CHECK(client.pendingCleanup().empty());
+  CHECK(client.keptUploads().empty());
+  CHECK(!client.transferActive());
 }

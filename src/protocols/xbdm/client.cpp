@@ -1015,6 +1015,11 @@ struct FileWriter::State {
   bool finalExistedAtOpen = false;
   // Set when finish() failed and kept the temporary file.
   std::optional<std::string> kept;
+  // Every line finish() may send, built and checked against maxCommandBytes by
+  // openWrite(), so that none fails on its length after the old file was deleted.
+  std::string deleteFinalLine;
+  std::string renameLine;
+  std::string deleteTemporaryLine;
 
   std::string context() const { return "sendfile " + path; }
 
@@ -1039,9 +1044,7 @@ struct FileWriter::State {
 
   // On the same connection, after the console answered.
   void removeTemporary() {
-    auto line = Command("delete").text("name", tempPath).finish(session->options.maxCommandBytes);
-    if (!line) return;
-    auto status = session->request(*line, {status::kOk}, "delete " + tempPath);
+    auto status = session->request(deleteTemporaryLine, {status::kOk}, "delete " + tempPath);
     if (status) {
       session->finishCommand();
     } else if (!isRefusal(status.error())) {
@@ -1087,6 +1090,10 @@ const std::string &FileWriter::temporaryPath() const noexcept {
 
 std::optional<std::string> FileWriter::keptPath() const noexcept {
   return state_ ? state_->kept : std::nullopt;
+}
+
+bool FileWriter::replacesExisting() const noexcept {
+  return state_ && state_->finalExistedAtOpen;
 }
 
 Result<void> FileWriter::write(std::span<const uint8_t> data) {
@@ -1158,7 +1165,7 @@ Result<void> FileWriter::finish() {
 
   // A file that was not there at openWrite() is someone else's: left alone.
   auto appeared = [&]() -> Result<void> {
-    return giveUp(makeError(ErrorCode::InvalidArgument,
+    return giveUp(makeError(ErrorCode::AlreadyExists,
                             s.context() + ": " + s.path + " appeared during the upload and was not replaced; " +
                                 (session.connected() ? "the upload was removed"
                                                      : "the upload is deleted by the next reconnect()")));
@@ -1171,9 +1178,7 @@ Result<void> FileWriter::finish() {
       return giveUp(makeError(ErrorCode::InvalidArgument, s.context() + ": a folder of that name exists"));
     }
     if (!s.finalExistedAtOpen) return appeared();
-    auto line = Command("delete").text("name", s.path).finish(session.options.maxCommandBytes);
-    if (!line) return giveUp(line.error());
-    auto removed = session.request(*line, {status::kOk}, "delete " + s.path);
+    auto removed = session.request(s.deleteFinalLine, {status::kOk}, "delete " + s.path);
     if (!removed) {
       // Once any of its line went out without an answer, the delete may have happened.
       if (!isRefusal(removed.error()) && session.delivery && session.delivery->delivery != Delivery::NotSent) {
@@ -1185,9 +1190,7 @@ Result<void> FileWriter::finish() {
     finalRemoved = "was deleted";
   }
 
-  auto line = Command("rename").text("name", s.tempPath).text("newname", s.path).finish(session.options.maxCommandBytes);
-  if (!line) return giveUp(line.error());
-  auto renamed = session.request(*line, {status::kOk}, "rename " + s.tempPath);
+  auto renamed = session.request(s.renameLine, {status::kOk}, "rename " + s.tempPath);
   if (!renamed) {
     // Refused while nothing was deleted: the final name may have appeared since
     // the lookup. Looked up once more, so other refusals keep their status.
@@ -1796,13 +1799,14 @@ Result<void> XbdmClient::rename(const std::string &from, const std::string &to) 
   if (!sameName(*driveOf(*source), *driveOf(*target))) {
     return fail(ErrorCode::InvalidArgument, "rename: '" + *source + "' and '" + *target + "' are on different drives");
   }
+  if (*source == *target) return fail(ErrorCode::InvalidArgument, "rename: '" + *source + "' is already its name");
   auto line = buildLine(Command("rename").text("name", *source).text("newname", *target), **s);
   if (!line) return unexpected<Error>(line.error());
   return mutating(**s, "rename", [&]() -> Result<void> {
     if (*source != *target && sameName(*source, *target)) return renameCase(**s, *source, *target, std::move(*line));
 
     auto existing = attributes(*target);
-    if (existing) return fail(ErrorCode::InvalidArgument, "rename: '" + *target + "' already exists");
+    if (existing) return fail(ErrorCode::AlreadyExists, "rename: '" + *target + "' already exists");
     if (!isRefusal(existing.error())) return unexpected<Error>(existing.error());
 
     auto r = singleLine(**s, std::move(line), "rename " + *source);
@@ -1870,6 +1874,12 @@ Result<FileWriter> XbdmClient::openWrite(const std::string &path, uint64_t size)
 
   auto line = buildLine(Command("sendfile").text("name", *temp).number("length", size), session);
   if (!line) return unexpected<Error>(line.error());
+  auto deleteFinal = buildLine(Command("delete").text("name", *canonical), session);
+  auto renameLine = buildLine(Command("rename").text("name", *temp).text("newname", *canonical), session);
+  auto deleteTemporary = buildLine(Command("delete").text("name", *temp), session);
+  for (const auto *built : {&deleteFinal, &renameLine, &deleteTemporary}) {
+    if (!*built) return unexpected<Error>(detail::withContext(built->error(), context));
+  }
   // What is at the final name now decides whether finish() may replace it.
   auto existing = lookUp(session, *canonical, false);
   if (!existing) return unexpected<Error>(existing.error());
@@ -1896,6 +1906,9 @@ Result<FileWriter> XbdmClient::openWrite(const std::string &path, uint64_t size)
   state->open = true;
   state->confirmed = status->code == status::kOk;
   state->finalExistedAtOpen = existing->has_value();
+  state->deleteFinalLine = std::move(*deleteFinal);
+  state->renameLine = std::move(*renameLine);
+  state->deleteTemporaryLine = std::move(*deleteTemporary);
   session.transferActive = true;
   return FileWriter(std::move(state));
 }

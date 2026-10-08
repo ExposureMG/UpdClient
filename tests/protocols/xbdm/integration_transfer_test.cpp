@@ -154,7 +154,7 @@ XBDM_LINK_TEST(XbdmTransferIntegration, AFileAnotherClientCreatesDuringAnUploadS
   REQUIRE_OK(theirs->finish());
   REQUIRE_OK(writer->write(std::span<const uint8_t>(data).subspan(2000)));
   auto r = writer->finish();
-  REQUIRE_ERR(r, ErrorCode::InvalidArgument);
+  REQUIRE_ERR(r, ErrorCode::AlreadyExists);
   CHECK_MSG(r.error().message.find("appeared during the upload") != std::string::npos, r.error().message);
   CHECK_EQ(*rig.mock.fileData("HDD:\\Content\\race.bin"), ut::bytesOf("own"));
   CHECK(!rig.mock.entry(temp).has_value());

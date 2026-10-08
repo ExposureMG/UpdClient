@@ -15,6 +15,7 @@ const char *errorCodeName(ErrorCode code) noexcept {
   case ErrorCode::Protocol: return "Protocol";
   case ErrorCode::LimitExceeded: return "LimitExceeded";
   case ErrorCode::Cancelled: return "Cancelled";
+  case ErrorCode::AlreadyExists: return "AlreadyExists";
   }
   return "Unknown";
 }

@@ -21,7 +21,10 @@ enum class ErrorCode {
   LimitExceeded,
   // An operation in progress was abandoned because the transport was closed
   // locally, typically by close() from another thread.
-  Cancelled
+  Cancelled,
+  // The name an operation would create or take is already in use (a file that
+  // appeared during an upload, the new name of a rename).
+  AlreadyExists
 };
 
 struct Error {

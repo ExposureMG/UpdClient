@@ -456,10 +456,9 @@ TEST(XbdmClient, ACaseOnlyRenameThatCannotFinishGoesBack) {
 
 TEST(XbdmClient, RenameOntoItselfIsStillRefused) {
   auto console = FakeConsole::create();
-  console->on("getfileattributes name=\"HDD:\\a.txt\"", "200- sizehi=0x0 sizelo=0x4\r\n");
   auto client = connected(console);
   CHECK_ERR(client.rename("HDD:\\a.txt", "HDD:\\a.txt"), ErrorCode::InvalidArgument);
-  CHECK_EQ(console->commands().size(), size_t{1});
+  CHECK(console->commands().empty());
 }
 
 TEST(XbdmClient, MakeDirectoryDeleteAndRename) {
@@ -492,7 +491,7 @@ TEST(XbdmClient, MakeDirectoryDeleteAndRename) {
   auto mustCopy = client.rename("HDD:\\a.txt", "HDD:\\sub\\c.txt");
   REQUIRE(!mustCopy);
   expectStatus(mustCopy.error(), 409);
-  CHECK_ERR(client.rename("HDD:\\a.txt", "HDD:\\taken"), ErrorCode::InvalidArgument);
+  CHECK_ERR(client.rename("HDD:\\a.txt", "HDD:\\taken"), ErrorCode::AlreadyExists);
   CHECK_ERR(client.rename("HDD:\\a.txt", "DEVKIT:\\a.txt"), ErrorCode::InvalidArgument);
   CHECK_ERR(client.makeDirectory("HDD:\\"), ErrorCode::InvalidArgument);
   CHECK_ERR(client.removeFile("HDD:"), ErrorCode::InvalidArgument);
