@@ -74,7 +74,7 @@ std::string powerText(const std::string &action, const net::Endpoint &endpoint, 
 Outcome<void> runList(Context &context, const std::string &directory) {
   auto path = consolePath(directory);
   if (!path) return unexpected<Failure>(path.error());
-  return withXbdm(context, "", [&](xbdm::XbdmClient &client, const net::Endpoint &) -> Outcome<void> {
+  return withXbdm(context, XbdmEffect::ReadOnly, "", [&](xbdm::XbdmClient &client, const net::Endpoint &) -> Outcome<void> {
     auto listing = client.list(*path);
     if (!listing) return fromError(listing.error());
     nlohmann::json entries = nlohmann::json::array();
@@ -96,7 +96,7 @@ Outcome<void> runList(Context &context, const std::string &directory) {
 Outcome<void> runStat(Context &context, const std::string &target) {
   auto path = consolePath(target);
   if (!path) return unexpected<Failure>(path.error());
-  return withXbdm(context, "", [&](xbdm::XbdmClient &client, const net::Endpoint &) -> Outcome<void> {
+  return withXbdm(context, XbdmEffect::ReadOnly, "", [&](xbdm::XbdmClient &client, const net::Endpoint &) -> Outcome<void> {
     auto a = client.attributes(*path);
     if (!a) return fromError(a.error());
     auto json = attributesJson(*a);
@@ -110,7 +110,7 @@ Outcome<void> runStat(Context &context, const std::string &target) {
 }
 
 Outcome<void> runDrives(Context &context) {
-  return withXbdm(context, "", [&](xbdm::XbdmClient &client, const net::Endpoint &) -> Outcome<void> {
+  return withXbdm(context, XbdmEffect::ReadOnly, "", [&](xbdm::XbdmClient &client, const net::Endpoint &) -> Outcome<void> {
     auto drives = client.drives();
     if (!drives) return fromError(drives.error());
     // Each drivefreespace may take up to the command timeout; past this budget the
@@ -149,7 +149,7 @@ Outcome<void> runRemove(Context &context, const std::string &target, bool direct
   auto path = consolePath(target);
   if (!path) return unexpected<Failure>(path.error());
   const std::string action = std::format("DELETE the {} {}", directory ? "empty folder" : "file", *path);
-  return withXbdm(context, action, [&](xbdm::XbdmClient &client, const net::Endpoint &) -> Outcome<void> {
+  return withXbdm(context, XbdmEffect::ChangesConsole, action, [&](xbdm::XbdmClient &client, const net::Endpoint &) -> Outcome<void> {
     auto r = directory ? client.removeDirectory(*path) : client.removeFile(*path);
     if (!r) return fromError(r.error());
     context.output.result({{"action", "delete"}, {"path", *path}, {"directory", directory}}, "Deleted " + *path);
@@ -162,7 +162,7 @@ Outcome<void> runMove(Context &context, const std::string &fromText, const std::
   if (!from) return unexpected<Failure>(from.error());
   auto to = consolePath(toText);
   if (!to) return unexpected<Failure>(to.error());
-  return withXbdm(context, "", [&](xbdm::XbdmClient &client, const net::Endpoint &) -> Outcome<void> {
+  return withXbdm(context, XbdmEffect::ChangesConsole, "", [&](xbdm::XbdmClient &client, const net::Endpoint &) -> Outcome<void> {
     auto r = client.rename(*from, *to);
     if (!r) return fromError(r.error());
     context.output.result({{"action", "rename"}, {"from", *from}, {"to", *to}}, "Renamed " + *from + " to " + *to);
@@ -171,7 +171,7 @@ Outcome<void> runMove(Context &context, const std::string &fromText, const std::
 }
 
 Outcome<void> runScreenshot(Context &context, const std::string &output) {
-  return withXbdm(context, "", [&](xbdm::XbdmClient &client, const net::Endpoint &) -> Outcome<void> {
+  return withXbdm(context, XbdmEffect::ReadOnly, "", [&](xbdm::XbdmClient &client, const net::Endpoint &) -> Outcome<void> {
     spdlog::info("Asking for a screenshot (the console can take a few seconds)...");
     auto shot = client.screenshot();
     if (!shot) return fromError(shot.error());
@@ -190,7 +190,7 @@ Outcome<void> runScreenshot(Context &context, const std::string &output) {
 Outcome<void> runLaunch(Context &context, const std::string &target) {
   auto path = consolePath(target);
   if (!path) return unexpected<Failure>(path.error());
-  return withXbdm(context, "launch " + *path + ", ending the running title",
+  return withXbdm(context, XbdmEffect::ChangesConsole, "launch " + *path + ", ending the running title",
                   [&](xbdm::XbdmClient &client, const net::Endpoint &endpoint) -> Outcome<void> {
                     auto r = client.launch(*path);
                     if (!r) return fromError(r.error());
@@ -202,7 +202,7 @@ Outcome<void> runLaunch(Context &context, const std::string &target) {
 }
 
 Outcome<void> runModules(Context &context) {
-  return withXbdm(context, "", [&](xbdm::XbdmClient &client, const net::Endpoint &) -> Outcome<void> {
+  return withXbdm(context, XbdmEffect::ReadOnly, "", [&](xbdm::XbdmClient &client, const net::Endpoint &) -> Outcome<void> {
     auto modules = client.modules();
     if (!modules) return fromError(modules.error());
     nlohmann::json list = nlohmann::json::array();
@@ -221,7 +221,7 @@ Outcome<void> runModules(Context &context) {
 }
 
 Outcome<void> runRegions(Context &context) {
-  return withXbdm(context, "", [&](xbdm::XbdmClient &client, const net::Endpoint &) -> Outcome<void> {
+  return withXbdm(context, XbdmEffect::ReadOnly, "", [&](xbdm::XbdmClient &client, const net::Endpoint &) -> Outcome<void> {
     auto regions = client.memoryRegions();
     if (!regions) return fromError(regions.error());
     nlohmann::json list = nlohmann::json::array();
@@ -239,7 +239,7 @@ Outcome<void> runRegions(Context &context) {
 }
 
 Outcome<void> runRaw(Context &context, const std::string &line) {
-  return withXbdm(context, "send the raw command '" + line + "'",
+  return withXbdm(context, XbdmEffect::ChangesConsole, "send the raw command '" + line + "'",
                   [&](xbdm::XbdmClient &client, const net::Endpoint &) -> Outcome<void> {
                     auto answer = client.rawCommand(line);
                     if (!answer) return fromError(answer.error());
@@ -257,7 +257,7 @@ Outcome<void> runRaw(Context &context, const std::string &line) {
 }
 
 Outcome<void> runEject(Context &context) {
-  return withXbdm(context, "", [&](xbdm::XbdmClient &client, const net::Endpoint &) -> Outcome<void> {
+  return withXbdm(context, XbdmEffect::ChangesConsole, "", [&](xbdm::XbdmClient &client, const net::Endpoint &) -> Outcome<void> {
     auto r = client.ejectTray();
     if (!r) return fromError(r.error());
     context.output.result({{"action", "eject"}}, "Opened the tray");
@@ -270,7 +270,7 @@ Outcome<void> runEject(Context &context) {
 Outcome<void> xbdmGet(Context &context, const std::string &remote, const std::string &local) {
   auto path = consolePath(remote);
   if (!path) return unexpected<Failure>(path.error());
-  return withXbdm(context, "", [&](xbdm::XbdmClient &client, const net::Endpoint &) -> Outcome<void> {
+  return withXbdm(context, XbdmEffect::ReadOnly, "", [&](xbdm::XbdmClient &client, const net::Endpoint &) -> Outcome<void> {
     spdlog::info("Downloading '{}' to '{}'...", *path, local);
     Progress progress("Download");
     auto result = client.downloadToFile(*path, pathFromUtf8(local), [&progress](uint64_t done, uint64_t total) {
@@ -287,7 +287,7 @@ Outcome<void> xbdmGet(Context &context, const std::string &remote, const std::st
 Outcome<void> xbdmSend(Context &context, const std::string &local, const std::string &remote) {
   auto path = consolePath(remote);
   if (!path) return unexpected<Failure>(path.error());
-  return withXbdm(context, "", [&](xbdm::XbdmClient &client, const net::Endpoint &) -> Outcome<void> {
+  return withXbdm(context, XbdmEffect::ChangesConsole, "", [&](xbdm::XbdmClient &client, const net::Endpoint &) -> Outcome<void> {
     spdlog::info("Uploading '{}' to '{}'...", local, *path);
     Progress progress("Upload");
     auto result = client.uploadFromFile(pathFromUtf8(local), *path, [&progress](uint64_t done, uint64_t total) {
@@ -304,7 +304,7 @@ Outcome<void> xbdmSend(Context &context, const std::string &local, const std::st
 Outcome<void> xbdmMkdir(Context &context, const std::string &remote) {
   auto path = consolePath(remote);
   if (!path) return unexpected<Failure>(path.error());
-  return withXbdm(context, "", [&](xbdm::XbdmClient &client, const net::Endpoint &) -> Outcome<void> {
+  return withXbdm(context, XbdmEffect::ChangesConsole, "", [&](xbdm::XbdmClient &client, const net::Endpoint &) -> Outcome<void> {
     auto result = client.makeDirectory(*path);
     if (!result) return fromError(result.error());
     context.output.result({{"action", "mkdir"}, {"path", *path}, {"acknowledged", true}}, "Created " + *path);
@@ -313,7 +313,7 @@ Outcome<void> xbdmMkdir(Context &context, const std::string &remote) {
 }
 
 Outcome<void> xbdmInfo(Context &context) {
-  return withXbdm(context, "", [&](xbdm::XbdmClient &client, const net::Endpoint &endpoint) -> Outcome<void> {
+  return withXbdm(context, XbdmEffect::ReadOnly, "", [&](xbdm::XbdmClient &client, const net::Endpoint &endpoint) -> Outcome<void> {
     auto info = client.consoleInfo();
     if (!info) return fromError(info.error());
     auto optional = [](const std::optional<std::string> &value) {
@@ -347,7 +347,7 @@ Outcome<void> xbdmInfo(Context &context) {
 }
 
 Outcome<void> xbdmPeek(Context &context, uint32_t address, uint32_t length) {
-  return withXbdm(context, "", [&](xbdm::XbdmClient &client, const net::Endpoint &) -> Outcome<void> {
+  return withXbdm(context, XbdmEffect::ReadOnly, "", [&](xbdm::XbdmClient &client, const net::Endpoint &) -> Outcome<void> {
     auto read = client.getMemoryEx(address, length);
     // getmemex is in two references only; getmem is the fallback (spec 3.16).
     if (!read && xbdm::consoleStatusCode(read.error()) == xbdm::status::kInvalidCommand) {
@@ -367,7 +367,7 @@ Outcome<void> xbdmPeek(Context &context, uint32_t address, uint32_t length) {
 
 Outcome<void> xbdmPoke(Context &context, uint32_t address, uint32_t value) {
   const std::string action = std::format("WRITE 0x{:08X} (big-endian) to memory at 0x{:08X}", value, address);
-  return withXbdm(context, action, [&](xbdm::XbdmClient &client, const net::Endpoint &) -> Outcome<void> {
+  return withXbdm(context, XbdmEffect::ChangesConsole, action, [&](xbdm::XbdmClient &client, const net::Endpoint &) -> Outcome<void> {
     const uint8_t bytes[4] = {static_cast<uint8_t>(value >> 24), static_cast<uint8_t>(value >> 16),
                               static_cast<uint8_t>(value >> 8), static_cast<uint8_t>(value)};
     auto result = client.setMemory(address, bytes);
@@ -383,7 +383,7 @@ Outcome<void> xbdmPoke(Context &context, uint32_t address, uint32_t value) {
 
 Outcome<void> xbdmReboot(Context &context, bool cold) {
   const std::string name = cold ? "cold reboot" : "reboot";
-  return withXbdm(context, cold ? "cold-reboot the console" : "reboot the console",
+  return withXbdm(context, XbdmEffect::ChangesConsole, cold ? "cold-reboot the console" : "reboot the console",
                   [&](xbdm::XbdmClient &client, const net::Endpoint &endpoint) -> Outcome<void> {
                     auto r = client.reboot(cold ? xbdm::RebootMode::Cold : xbdm::RebootMode::Warm);
                     if (!r) return fromError(r.error());
@@ -393,7 +393,7 @@ Outcome<void> xbdmReboot(Context &context, bool cold) {
 }
 
 Outcome<void> xbdmShutdown(Context &context) {
-  return withXbdm(context, "shut the console down",
+  return withXbdm(context, XbdmEffect::ChangesConsole, "shut the console down",
                   [&](xbdm::XbdmClient &client, const net::Endpoint &endpoint) -> Outcome<void> {
                     auto r = client.shutdown();
                     if (!r) return fromError(r.error());

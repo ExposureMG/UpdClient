@@ -31,7 +31,8 @@ Outcome<void> withUpdServer(Context &context, const std::string &destructiveActi
   return body(*client, *endpoint);
 }
 
-Outcome<void> withXbdm(Context &context, const std::string &destructiveAction, const XbdmBody &body) {
+Outcome<void> withXbdm(Context &context, XbdmEffect effect, const std::string &destructiveAction,
+                       const XbdmBody &body) {
   const bool destructive = !destructiveAction.empty();
   if (destructive) {
     if (auto possible = context.requireConfirmationPossible(); !possible) return possible;
@@ -85,7 +86,8 @@ Outcome<void> withXbdm(Context &context, const std::string &destructiveAction, c
     Failure &failure = outcome.error();
     if (const auto kept = client->keptUploads(); !kept.empty()) failure.keptUpload = kept.back();
     const auto delivery = client->lastDelivery();
-    if (failure.consoleStatus == 0 && delivery && delivery->delivery != xbdm::Delivery::Answered) {
+    if (effect == XbdmEffect::ChangesConsole && failure.consoleStatus == 0 && delivery &&
+        delivery->delivery != xbdm::Delivery::Answered) {
       failure.delivery = delivery->delivery == xbdm::Delivery::NotSent ? "not_sent" : "unknown";
     }
   }

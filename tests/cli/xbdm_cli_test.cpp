@@ -432,3 +432,13 @@ TEST(XbdmCli, MovingOntoAnExistingNameIsAlreadyExists) {
   CHECK_MSG(contains(run.out, "\"code\": \"AlreadyExists\""), describe(run));
   CHECK(cli.rig.mock.entry("HDD:\\default.xex").has_value());
 }
+
+TEST(XbdmCli, AReadOnlyCommandHasNoDelivery) {
+  CliRig cli;
+  cli.rig.mock.inject(XbdmFault::dropAfterBytes(0).on("dirlist"));
+  auto run = cli.run({"--json", "xbdm", "ls", "HDD:\\"});
+  CHECK_MSG(run.exit == 1, describe(run));
+  CHECK_MSG(contains(run.out, "\"error\""), describe(run));
+  CHECK_MSG(!contains(run.out, "command_delivery"), describe(run));
+  CHECK_MSG(!contains(run.err, "may have carried the command out"), describe(run));
+}
