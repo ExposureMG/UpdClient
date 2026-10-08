@@ -2,6 +2,7 @@
 
 #include "support/loopback_server.hpp"
 #include "support/memory_transport.hpp"
+#include "support/tcp_server_transport.hpp"
 
 #include <net/udp_socket.hpp>
 
@@ -242,62 +243,6 @@ struct Connection {
   bool dedicated = false;
   bool busy = false;
   bool counted = false;
-};
-
-// The server end of an accepted TCP connection. close() shuts the socket down,
-// which wakes a recv or send blocked on another thread; the descriptor is released
-// only by the destructor, after the serving thread has been joined.
-class TcpServerTransport final : public net::ITransport {
-public:
-  explicit TcpServerTransport(SocketHandle socket) : socket_(std::move(socket)) {}
-
-  bool isOpen() const noexcept override { return !closed_.load(); }
-  void close() noexcept override {
-    if (closed_.exchange(true)) return;
-#if defined(_WIN32)
-    ::shutdown(socket_.get(), SD_BOTH);
-#else
-    ::shutdown(socket_.get(), SHUT_RDWR);
-#endif
-  }
-  std::string describe() const override { return "tcp-server://127.0.0.1"; }
-  Result<void> setTimeout(std::chrono::milliseconds timeout) override {
-    timeoutMs_ = timeout.count();
-    return {};
-  }
-  Result<size_t> readSome(std::span<uint8_t> buffer) override {
-    if (closed_) return fail(ErrorCode::NotConnected, "closed");
-    if (buffer.empty()) return size_t{0};
-    const auto ms = timeoutMs_.load();
-    if (ms > 0 && !waitReadableMs(socket_.get(), static_cast<int>(ms))) {
-      if (closed_) return fail(ErrorCode::Cancelled, "closed");
-      return fail(ErrorCode::Timeout, "read timed out");
-    }
-    const int n = ::recv(socket_.get(), reinterpret_cast<char *>(buffer.data()),
-                         static_cast<int>(std::min<size_t>(buffer.size(), 1 << 20)), 0);
-    if (closed_) return fail(ErrorCode::Cancelled, "closed");
-    if (n < 0) return fail(ErrorCode::Disconnected, "recv failed", nativeError());
-    return static_cast<size_t>(n);
-  }
-  Result<size_t> writeSome(std::span<const uint8_t> data) override {
-    if (closed_) return fail(ErrorCode::NotConnected, "closed");
-    if (data.empty()) return size_t{0};
-#if defined(MSG_NOSIGNAL)
-    constexpr int kFlags = MSG_NOSIGNAL;
-#else
-    constexpr int kFlags = 0;
-#endif
-    const int n = ::send(socket_.get(), reinterpret_cast<const char *>(data.data()),
-                         static_cast<int>(std::min<size_t>(data.size(), 1 << 20)), kFlags);
-    if (closed_) return fail(ErrorCode::Cancelled, "closed");
-    if (n <= 0) return fail(ErrorCode::Disconnected, "send failed", nativeError());
-    return static_cast<size_t>(n);
-  }
-
-private:
-  SocketHandle socket_;
-  std::atomic<bool> closed_{false};
-  std::atomic<long long> timeoutMs_{0};
 };
 
 const char *errorText(int code) {
