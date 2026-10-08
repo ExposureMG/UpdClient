@@ -45,7 +45,8 @@ Contract:
   than waiting for its timeout or reporting end of stream. Never release a handle that a blocked call
   may still be using. See [Cancellation](ARCHITECTURE.md#cancellation) for how `TcpTransport` does
   it. In the serial example below, `SerialPort::close()` (not shown) would have to do the same.
-- Translate OS errors into `ErrorCode` values (`ConnectFailed` when opening, `Timeout`, `Disconnected`,
+- Translate OS errors into `ErrorCode` values (`ConnectFailed` for every failure to open, a timeout
+  included, `Timeout` for a call on an open connection, `Disconnected`,
   `Io`). Put the OS error number in `Error::sysError`.
 - Read device-specific settings from `Endpoint::options`; reject bad ones with `InvalidArgument`.
 - Protocol clients call `TransportRegistry::withDefaultPort` before connecting. For `tcp` that fills in
@@ -754,7 +755,8 @@ Rules for CLI commands:
   `suspend`, `resume`) have no client API yet; `rawCommand` reaches the single-line ones. Screenshots are
   returned still tiled. `getmem` is not used automatically when `getmemex` is missing; the CLI's
   `mem peek` falls back on 407. `getMemory` sends `getmem` in requests of at most 0x400 bytes.
-- Timeouts apply to each connect and each read or write call, not to a whole transfer.
+- `Endpoint::timeout` bounds a TCP connect as a whole, name lookup included; after that, timeouts apply
+  to each read or write call, not to a whole transfer (XBDM adds its own command deadlines).
 - Many UpdServer commands are not acknowledged; success means "sent". The protocol has no framing, so
   a failed exchange closes the connection.
 - `http_lite` is HTTP/1.0 GET only: no chunked encoding, redirects, keep-alive or TLS. Responses with

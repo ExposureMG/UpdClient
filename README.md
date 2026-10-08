@@ -223,14 +223,16 @@ Things to know:
 
 - `Result<T>` is `expected<T, Error>`. `Error` carries an `ErrorCode` (`Unknown`, `InvalidArgument`,
   `Unsupported`, `NotConnected`, `ConnectFailed`, `Timeout`, `Disconnected`, `Io`, `Protocol`,
-  `LimitExceeded`, `Cancelled`), a message and the OS error number. `formatError` renders all three and
-  `errorCodeName` gives the code as text.
+  `LimitExceeded`, `Cancelled`, `AlreadyExists`), a message and the OS error number. `formatError`
+  renders all three and `errorCodeName` gives the code as text. New codes are only ever appended.
+  `ConnectFailed` means no connection could be made (refused, unreachable, timed out, resolver
+  failure; a timeout carries `ETIMEDOUT`); `Timeout` means a connection that was made went quiet.
 - `Endpoint` is a URI: `scheme://host[:port][?key=value&...]`. A bare `host` or `host:port` means `tcp`.
   Port 0 means "unspecified": for `tcp` the protocol client substitutes its default (UpdServer 49,
   XeLL 80); other schemes keep port 0 unless they were registered with `net::SchemeTraits` (a fixed
   `defaultPort`, or `usesProtocolPort`). The `timeout` option (milliseconds, capped at
-  `Endpoint::kMaxTimeout`, 24 hours) sets `Endpoint::timeout`, which bounds the connect and the initial
-  read/write timeout. Other options are kept in `Endpoint::options` for transports that need them.
+  `Endpoint::kMaxTimeout`, 24 hours) sets `Endpoint::timeout`, which bounds the whole connect (name
+  lookup and every address together) and is the initial read/write timeout. Other options are kept in `Endpoint::options` for transports that need them.
 - To cancel a long read or write, call `close()` on its transport from another thread: the blocked
   call returns `ErrorCode::Cancelled` at once instead of waiting for its timeout. A TCP connect has no
   transport to close yet: pass a `std::stop_token` to `TcpTransport::connect` (or to the XBDM connect
@@ -238,7 +240,11 @@ Things to know:
   bounded by `Endpoint::timeout`.
 - TCP hosts are IPv4 addresses or host names. A name is looked up within `Endpoint::timeout`, and a
   stop request ends the lookup too; a name that does not resolve is `InvalidArgument`. UDP sockets
-  take numeric addresses only.
+  take numeric addresses only. `TcpTransport::peer()` and `XbdmClient::peer()` give the address
+  actually connected as an `Endpoint` (numeric host and port), so nothing has to parse `describe()`.
+- The stop-token functions are overloads: existing calls compile unchanged, but taking the address
+  of one of the overloaded functions (`&XbdmClient::connect`, `&xbdm::identify`, ...) needs a cast to
+  the wanted signature.
 - Protocol clients never create sockets. `UpdServerClient` takes a `net::TransportPtr` (or connects
   one through `TransportRegistry`); `XellClient` takes a connector returning a transport. Anything
   that implements `net::ITransport` can carry either protocol.
@@ -264,12 +270,16 @@ Things to know:
   `FileWriter::cancel()` may be called from any thread. Console paths are `HDD:\dir\file`;
   `xbdm::toConsolePath` converts `/HDD/dir/file`. `ClientOptions::trace` receives every command and
   text line, and the size of binary data, never its bytes. An upload replaces only a file that existed
-  when `openWrite()` ran: it deletes it right before the rename, while a file that appeared during the
-  upload fails `finish()` with `InvalidArgument` and is left alone. If the rename fails after the
-  delete, the data stays under the temporary name, which `FileWriter::keptPath()` and
-  `XbdmClient::keptUploads()` report, and is never deleted. After a failed call that changes something,
-  `lastDelivery()` says whether its command reached the console (`NotSent` is safe to repeat, `Sent`
-  may have happened). A rename that only changes the case of a name is allowed. `XbdmClient::connect`
+  when `openWrite()` ran (`FileWriter::replacesExisting()`): it deletes it right before the rename,
+  while a file that appeared during the upload fails `finish()` with `AlreadyExists` and is left alone
+  (a folder there is `InvalidArgument`). `openWrite()` checks every command line the upload needs
+  before it sends anything. If the rename fails after the delete, the data stays under the temporary
+  name, which `FileWriter::keptPath()` and `XbdmClient::keptUploads()` report, and is never deleted.
+  After a failed call that changes something, `lastDelivery()` says how far the call got: `NotSent`
+  means nothing that can change the console left the client, so it is safe to repeat; `Sent` means it
+  may have happened, also when an earlier step of the call took effect. `rename()` onto an existing
+  name fails with `AlreadyExists`. A rename that only changes the case of a name is allowed, and when
+  its fallback does not finish the error says where the file is. `XbdmClient::connect`
   and `open`, `XbdmDiscovery::discover`, `findByName`, `probeAddress`, `xbdm::identify` and
   `DiscoveryRegistry::discoverAll` have `std::stop_token` overloads, so a GUI can cancel them with one
   `std::stop_source` per operation; a stopped search returns what it found. `cancel()` also ends a
@@ -378,7 +388,7 @@ updclient --target xbdm://192.168.1.50 --trace xbdm-trace.txt xbdm drives
 | Code | Meaning |
 | --- | --- |
 | 0 | Success (also `--help` and `--version`) |
-| 1 | Runtime or transport error, including a declined confirmation, an XBDM refusal (4xx) and a cancelled transfer |
+| 1 | Runtime or transport error, including a declined confirmation, an XBDM refusal (4xx), a name already in use (`AlreadyExists`, for example `xbdm mv` onto an existing name) and a cancelled transfer |
 | 2 | Usage error: bad arguments, `--target` with `--ip`, a destructive command without `--yes` and without a terminal, `xell` without a target, a scheme with no registered transport, or any library `InvalidArgument` error |
 | 3 | Discovery found nothing, or discovery is unavailable (for example the UDP port cannot be bound) |
 

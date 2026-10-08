@@ -32,7 +32,10 @@ Status: implemented as C1 to C10 (see "Suggested commits"). Line numbers refer t
 
 ## API additions
 
-All additive and source-compatible; existing callers compile and link unchanged.
+All additive and source-compatible: existing calls compile and link unchanged. Taking the address of a
+function that gained an overload (`&XbdmClient::connect`, `&XbdmClient::open`, the three
+`XbdmDiscovery` searches, `&xbdm::identify`, `&DiscoveryRegistry::discoverAll`) needs a cast to the
+wanted signature since C3 and C4.
 
 | # | Header | Addition | Gap | Consumer impact (CLI / GUI) |
 |---|---|---|---|---|
@@ -674,6 +677,11 @@ rename). It leaves the links to `ARCHITECTURE.md` and `HARDWARE_TEST_PLAN.md` as
 7. `XbdmClient::cancel()` ends a `reconnect()` during its TCP connect (built-in connector).
 8. CLI: Ctrl-C works while connecting, discovering and cleaning up; JSON errors may carry
    `kept_upload` and `command_delivery`; an auto-discovered XBDM target uses the discovered port.
+9. A delete in `finish()` that never left the client no longer keeps the upload: the temporary file is
+   removed or queued for `reconnect()` instead (C6).
+10. A final rename that the console refuses, when nothing was deleted and nothing existed at
+    `openWrite()`, is followed by one more lookup of the final name; only a file found there turns the
+    refusal into "appeared" (C7, instead of "any 4xx means it appeared").
 
 Everything else is opt-in through the API additions A1 to A6.
 
