@@ -23,10 +23,13 @@ struct Failure {
   int exitCode = kExitRuntime;
   // The 4xx status of an XBDM refusal; sysError is 0 then.
   int consoleStatus = 0;
+  // The kind of an `error=` answer from a JRPC console ("could_not_resolve",
+  // "version_mismatch", "parameters_not_found" or "other"); sysError is 0 then.
+  std::string remoteFault = {};
   // An XBDM upload that failed but is kept on the console under this name.
   std::optional<std::string> keptUpload = std::nullopt;
-  // How far the failed XBDM command got: "not_sent", or "unknown" when it may
-  // have been carried out.
+  // How far the failed XBDM or JRPC command got: "not_sent", or "unknown" when it
+  // may have been carried out.
   std::optional<std::string> delivery = std::nullopt;
 };
 
@@ -51,7 +54,7 @@ struct GlobalOptions {
 };
 
 // Which kind of console a command talks to; it decides the default port.
-enum class Service { UpdServer, Xell, Xbdm };
+enum class Service { UpdServer, Xell, Xbdm, Jrpc };
 
 // State shared by every command: global options, stdout rendering and the exit code.
 class Context {
@@ -70,6 +73,9 @@ public:
   // --target names an xbdm:// endpoint: the file, mem, power and info commands
   // then speak XBDM instead of UpdServer.
   bool targetsXbdm() const;
+  // --target names a jrpc:// endpoint: the info and power shutdown commands then
+  // speak JRPC, and the UpdServer, XeLL and XBDM commands refuse the target.
+  bool targetsJrpc() const;
 
   // Explicit target, or the first UpdServer console found by discovery.
   Outcome<net::Endpoint> resolveUpdServerEndpoint() const;
@@ -78,6 +84,9 @@ public:
   // Explicit target (a bare host means xbdm://), or the first console that answers
   // XBDM discovery.
   Outcome<net::Endpoint> resolveXbdmEndpoint() const;
+  // JRPC does not announce itself, so --target or --ip is required; a bare host
+  // means jrpc:// and the default port is 1409.
+  Outcome<net::Endpoint> resolveJrpcEndpoint() const;
 
   // Fails right away when a destructive command could not be confirmed at all.
   Outcome<void> requireConfirmationPossible() const;

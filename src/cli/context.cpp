@@ -59,6 +59,17 @@ Outcome<void> checkSchemeRegistered(const net::Endpoint &endpoint) {
                     joinSchemes(schemes) + ")");
 }
 
+// The word JSON output and scripts see for a kind of `error=` answer.
+const char *remoteFaultName(jrpc::RemoteFault fault) noexcept {
+  switch (fault) {
+  case jrpc::RemoteFault::CouldNotResolve: return "could_not_resolve";
+  case jrpc::RemoteFault::VersionMismatch: return "version_mismatch";
+  case jrpc::RemoteFault::ParametersNotFound: return "parameters_not_found";
+  case jrpc::RemoteFault::Other: break;
+  }
+  return "other";
+}
+
 } // namespace
 
 int exitCodeFor(ErrorCode code) noexcept {
@@ -81,6 +92,9 @@ unexpected<Failure> fromError(const Error &error) {
   if (const auto status = xbdm::consoleStatusCode(error)) {
     failure.sysError = 0;
     failure.consoleStatus = *status;
+  } else if (const auto fault = jrpc::remoteFault(error)) {
+    failure.sysError = 0;
+    failure.remoteFault = remoteFaultName(*fault);
   }
   return unexpected<Failure>(std::move(failure));
 }
@@ -107,6 +121,7 @@ Outcome<net::Endpoint> Context::explicitEndpoint(Service service) const {
   if (!parsed) return usageError("invalid target '" + spec + "': " + parsed.error().message);
   net::Endpoint endpoint = std::move(*parsed);
   if (service == Service::Xbdm && spec.find("://") == std::string::npos) endpoint.scheme = "xbdm";
+  if (service == Service::Jrpc && spec.find("://") == std::string::npos) endpoint.scheme = "jrpc";
 
   const std::optional<uint16_t> &selected = forXell ? options.xellPort : options.port;
   if (selected) {
@@ -119,6 +134,8 @@ Outcome<net::Endpoint> Context::explicitEndpoint(Service service) const {
   const std::string scheme = lowered(endpoint.scheme);
   if (endpoint.port == 0 && service == Service::Xbdm && (scheme == "tcp" || scheme == "xbdm")) {
     endpoint.port = xbdm::kXbdmPort;
+  } else if (endpoint.port == 0 && service == Service::Jrpc && (scheme == "tcp" || scheme == "jrpc")) {
+    endpoint.port = jrpc::kJrpcPort;
   } else if (endpoint.port == 0 && scheme == "tcp") {
     endpoint.port = forXell ? xell::kXellHttpPort : updserver::NANDSVR_PORT;
   }
@@ -134,10 +151,21 @@ bool Context::targetsXbdm() const {
   return parsed && lowered(parsed->scheme) == "xbdm";
 }
 
+bool Context::targetsJrpc() const {
+  if (options.target.empty()) return false;
+  auto parsed = net::Endpoint::parse(options.target);
+  return parsed && lowered(parsed->scheme) == "jrpc";
+}
+
 Outcome<net::Endpoint> Context::resolveUpdServerEndpoint() const {
   if (targetsXbdm()) {
     return usageError("this is an UpdServer command and the target is an XBDM console (xbdm://); see "
                       "'updclient xbdm --help' for what XBDM supports");
+  }
+  if (targetsJrpc()) {
+    return usageError("this is an UpdServer command and the target is a JRPC console (jrpc://); JRPC has no memory, "
+                      "file, NAND or reboot commands (XBDM has memory and file commands: use xbdm://); see "
+                      "'updclient jrpc --help' for what JRPC supports");
   }
   if (hasExplicitTarget()) return explicitEndpoint(Service::UpdServer);
   if (options.xellPort) {
@@ -177,10 +205,15 @@ Outcome<net::Endpoint> Context::resolveXellEndpoint() const {
     return usageError("xell commands need --target or --ip: XeLL does not announce itself, so it is never auto-discovered");
   }
   if (targetsXbdm()) return usageError("xell commands talk to XeLL's HTTP server, not to an xbdm:// target");
+  if (targetsJrpc()) return usageError("xell commands talk to XeLL's HTTP server, not to a jrpc:// target");
   return explicitEndpoint(Service::Xell);
 }
 
 Outcome<net::Endpoint> Context::resolveXbdmEndpoint() const {
+  if (targetsJrpc()) {
+    return usageError("this is an XBDM command and the target is a JRPC console (jrpc://); see "
+                      "'updclient jrpc --help' for what JRPC supports");
+  }
   if (hasExplicitTarget()) return explicitEndpoint(Service::Xbdm);
   if (options.xellPort) return usageError("--xell-port only applies to xell commands");
 
@@ -216,6 +249,17 @@ Outcome<net::Endpoint> Context::resolveXbdmEndpoint() const {
   return endpoint;
 }
 
+Outcome<net::Endpoint> Context::resolveJrpcEndpoint() const {
+  if (!hasExplicitTarget()) {
+    return usageError("jrpc commands need --target or --ip: JRPC does not announce itself, so it is never auto-discovered");
+  }
+  if (targetsXbdm()) {
+    return usageError("jrpc commands talk to the JRPC plugin (port 1409), not to an xbdm:// target; see "
+                      "'updclient xbdm --help' for what XBDM supports");
+  }
+  return explicitEndpoint(Service::Jrpc);
+}
+
 Outcome<void> Context::requireConfirmationPossible() const {
   if (options.yes || interactive()) return {};
   return usageError("this command is destructive; pass --yes to run it without an interactive terminal");
@@ -246,7 +290,7 @@ void Context::finish(const Outcome<void> &outcome) {
   }
   if (failure.delivery == "unknown") spdlog::warn("The console may have carried the command out; check before repeating it");
   output.error(failure.code, failure.message, failure.sysError, failure.consoleStatus, failure.keptUpload,
-               failure.delivery);
+               failure.delivery, failure.remoteFault);
   exitCode = failure.exitCode;
 }
 

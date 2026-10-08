@@ -21,10 +21,11 @@ public:
   // printed for empty text); JSON mode prints data.
   void result(const nlohmann::json &data, std::string_view text);
   // JSON mode only; the human readable message is logged to stderr by the caller.
-  // keptUpload and delivery become "kept_upload" and "command_delivery" when set.
+  // keptUpload, delivery and remoteFault become "kept_upload", "command_delivery" and
+  // "remote_fault" when set.
   void error(std::string_view code, std::string_view message, int sysError = 0, int consoleStatus = 0,
              const std::optional<std::string> &keptUpload = std::nullopt,
-             const std::optional<std::string> &delivery = std::nullopt);
+             const std::optional<std::string> &delivery = std::nullopt, std::string_view remoteFault = {});
 
 private:
   void writeDocument(const nlohmann::json &document);

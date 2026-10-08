@@ -31,6 +31,24 @@ enum class XbdmEffect { ReadOnly, ChangesConsole };
 Outcome<void> withXbdm(Context &context, XbdmEffect effect, const std::string &destructiveAction,
                        const XbdmBody &body);
 
+using JrpcBody = std::function<Outcome<void>(jrpc::JrpcClient &, const net::Endpoint &)>;
+
+// Whether a command can change the console: only then does a failure say how far
+// its command got (JSON "command_delivery"). Every call is treated as a change.
+enum class JrpcEffect { ReadOnly, ChangesConsole };
+
+// As withXbdm, for a JRPC console: --target or --ip is required (resolveJrpcEndpoint),
+// since JRPC does not announce itself. --timeout-ms sets the banner, idle and call
+// timeouts (0 for none); --trace records the session. Ctrl-C cancels the connect and
+// banner, or the call in progress. A failed command that changes the console says how
+// far its line got, unless the console answered it (an `error=` line is an answer).
+Outcome<void> withJrpc(Context &context, JrpcEffect effect, const std::string &destructiveAction,
+                       const JrpcBody &body);
+
+// Is JRPC installed at the target? As withJrpc up to the banner, which is read and
+// answered with Bye; no command is sent (jrpc::identify).
+Outcome<jrpc::IdentifyResult> identifyJrpc(Context &context);
+
 using XellBody = std::function<Outcome<void>(const xell::XellClient &, const net::Endpoint &)>;
 
 // XeLL needs an explicit target; the client connects per request, so nothing is

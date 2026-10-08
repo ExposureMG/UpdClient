@@ -1,5 +1,6 @@
 #include "cli/args.hpp"
 #include "cli/commands.hpp"
+#include "cli/jrpc.hpp"
 #include "cli/session.hpp"
 #include "cli/xbdm.hpp"
 
@@ -17,6 +18,7 @@ void addPowerCommand(CLI::App *group, Context &context, const std::string &name,
   command->callback([&context, name, action, send = std::move(send)] {
     if (context.targetsXbdm() && name == "reboot") return context.finish(xbdmReboot(context, false));
     if (context.targetsXbdm() && name == "shutdown") return context.finish(xbdmShutdown(context));
+    if (context.targetsJrpc() && name == "shutdown") return context.finish(jrpcShutdown(context));
     context.finish(withUpdServer(
         context, action,
         [&](updserver::UpdServerClient &client, const net::Endpoint &endpoint) -> Outcome<void> {
@@ -34,7 +36,7 @@ void addPowerCommand(CLI::App *group, Context &context, const std::string &name,
 
 void registerPowerCommands(CLI::App &app, Context &context) {
   auto *power = addGroup(app, "power",
-                         "Console power management, UpdServer or XBDM (destructive: needs --yes or confirmation)");
+                         "Console power management, UpdServer or XBDM; JRPC only shutdown (destructive: needs --yes or confirmation)");
   addPowerCommand(power, context, "reboot", "Software reboot the console", "reboot the console",
                   [](updserver::UpdServerClient &client) { return client.reboot(); });
   addPowerCommand(power, context, "smc-reset", "Hardware SMC reset of the console", "SMC-reset the console",

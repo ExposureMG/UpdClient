@@ -6,13 +6,14 @@
 
 namespace updclient::cli {
 
-Outcome<std::unique_ptr<TraceFile>> TraceFile::open(const std::string &path, const std::string &target) {
+Outcome<std::unique_ptr<TraceFile>> TraceFile::open(const std::string &path, const std::string &target,
+                                                    std::string_view protocol) {
   std::unique_ptr<TraceFile> trace(new TraceFile());
   trace->out_.open(pathFromUtf8(path), std::ios::binary | std::ios::app);
   if (!trace->out_) return usageError("cannot open the trace file '" + path + "' for writing");
   trace->start_ = std::chrono::steady_clock::now();
   const auto now = std::chrono::floor<std::chrono::milliseconds>(std::chrono::system_clock::now());
-  trace->out_ << std::format("# updclient {} XBDM trace of {}, started {:%FT%TZ}\n", kVersion, target, now)
+  trace->out_ << std::format("# updclient {} {} trace of {}, started {:%FT%TZ}\n", kVersion, protocol, target, now)
               << "# '>' command sent, '<' line received; binary data is shown by its size only\n";
   trace->out_.flush();
   return trace;
@@ -25,6 +26,15 @@ TraceFile::~TraceFile() {
 
 xbdm::TraceHook TraceFile::hook() {
   return [this](xbdm::TraceEvent event, std::string_view text, uint64_t bytes) { record(event, text, bytes); };
+}
+
+jrpc::TraceHook TraceFile::jrpcHook() {
+  // JRPC has no binary data: every event is one text line.
+  return [this](jrpc::TraceEvent event, std::string_view text, uint64_t) { recordJrpc(event, text); };
+}
+
+void TraceFile::recordJrpc(jrpc::TraceEvent event, std::string_view text) {
+  line(event == jrpc::TraceEvent::Sent ? '>' : '<', text);
 }
 
 void TraceFile::record(xbdm::TraceEvent event, std::string_view text, uint64_t bytes) {

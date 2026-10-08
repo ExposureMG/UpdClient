@@ -19,8 +19,10 @@ namespace {
 constexpr const char *kFooter =
     "Targets: --target takes a URI such as tcp://192.168.1.5:49, or a bare IP address or host name;\n"
     "--ip and --port are shortcuts for tcp targets. With --target xbdm://192.168.1.5 (port 730) the\n"
-    "file, mem, power and info commands speak XBDM, the Xbox debug monitor, instead of UpdServer. UpdServer and xbdm\n"
-    "commands auto-discover a console when no target is given; xell commands never do.\n"
+    "file, mem, power and info commands speak XBDM, the Xbox debug monitor, instead of UpdServer. With\n"
+    "--target jrpc://192.168.1.5 (port 1409) the info and power shutdown commands speak JRPC, the console\n"
+    "plugin; the jrpc group takes a bare host as well. UpdServer and xbdm commands auto-discover a console\n"
+    "when no target is given; xell and jrpc commands never do.\n"
     "Numbers: decimal (4096) or 0x-prefixed hex (0x1000).\n"
     "Output: results go to stdout, logs to stderr; --json prints exactly one JSON document.\n"
     "Exit codes: 0 ok, 1 runtime or transport error, 2 usage error, 3 discovery found nothing or is unavailable.";
@@ -37,7 +39,7 @@ void addGlobalOptions(CLI::App &app, Context &context) {
   app.add_option("-t,--target", options.target,
                  "Target URI, e.g. tcp://192.168.1.5:49, or a bare IP address or host name (default: auto-discover for UpdServer)");
   app.add_option("-i,--ip", options.ip, "Target IP address or host name (shortcut for --target)");
-  addNumber(&app, "-p,--port", options.port, "UpdServer TCP port, default 49");
+  addNumber(&app, "-p,--port", options.port, "TCP port, default 49 (UpdServer), 730 (xbdm) or 1409 (jrpc)");
   addNumber(&app, "--xell-port", options.xellPort, "XeLL HTTPD port for xell commands, default 80");
   addNumber(&app, "--timeout-ms", options.timeoutMs, "Connect and I/O timeout in milliseconds, 0 for none, default 5000");
   addNumber(&app, "--discovery-timeout-ms", options.discoveryTimeoutMs, "How long discovery listens, in milliseconds")
@@ -46,8 +48,8 @@ void addGlobalOptions(CLI::App &app, Context &context) {
   app.add_flag("-v,--verbose", options.verbose, "Log debug detail to stderr");
   app.add_flag("--yes", options.yes, "Skip the confirmation required by destructive commands");
   app.add_option("--trace", options.trace,
-                 "Append every XBDM command line and every line received to this file (file data is never "
-                 "written, only its size)");
+                 "Append every XBDM or JRPC command line and every line received to this file (file data is "
+                 "never written, only its size)");
 }
 
 // The deepest subcommand that was parsed, so help can describe the command the
@@ -106,9 +108,10 @@ int run(int argc, char **argv) {
   initLogging();
   registerBuiltins();
   xbdm::registerXbdmScheme();
+  jrpc::registerJrpcScheme();
 
   Context context;
-  CLI::App app{std::string("UpdClient - client for the Xbox 360 UpdServer, XeLL and XBDM network services"),
+  CLI::App app{std::string("UpdClient - client for the Xbox 360 UpdServer, XeLL, XBDM and JRPC network services"),
                "updclient"};
   app.set_version_flag("--version", std::string("updclient ") + kVersion);
   app.require_subcommand(1);
@@ -125,6 +128,7 @@ int run(int argc, char **argv) {
   registerFileCommands(app, context);
   registerXellCommands(app, context);
   registerXbdmCommands(app, context);
+  registerJrpcCommands(app, context);
   app.footer(kFooter);
 
   try {

@@ -16,5 +16,6 @@ void registerMemCommands(CLI::App &app, Context &context);
 void registerFileCommands(CLI::App &app, Context &context);
 void registerXellCommands(CLI::App &app, Context &context);
 void registerXbdmCommands(CLI::App &app, Context &context);
+void registerJrpcCommands(CLI::App &app, Context &context);
 
 } // namespace updclient::cli
